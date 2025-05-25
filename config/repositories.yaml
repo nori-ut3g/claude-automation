@@ -1,0 +1,100 @@
+# Claude Automation System - リポジトリ設定
+# 監視対象のGitHubリポジトリとその設定を定義
+
+default_settings:
+  check_interval: 60              # 監視間隔（秒）
+  max_concurrent: 3               # 最大同時実行数
+  branch_strategy: "github-flow"  # デフォルトのブランチ戦略
+  base_branch: "main"            # デフォルトのベースブランチ
+  develop_branch: "develop"      # Git-flow用の開発ブランチ
+  
+  # デフォルトのラベルとキーワード
+  default_labels:
+    - "claude-auto"
+  default_keywords:
+    - "@claude-execute"
+    - "@claude-implement"
+    - "@claude-fix"
+
+repositories:
+  # 例: 個別リポジトリの設定
+  - name: "nori-ut3g/claude-automation-test"
+    enabled: true
+    labels: 
+      - "claude-auto"
+      - "enhancement"
+    keywords: 
+      - "@claude-execute"
+      - "@claude-implement"
+    branch_strategy: "gitflow"
+    base_branch: "main"
+    develop_branch: "develop"
+    slack_channel: "#dev-automation"
+    jira_project: "AUTO"
+    
+    # カスタム設定
+    auto_merge: false
+    require_review: true
+    reviewers:
+      - "@developer-team"
+    
+  # 例: シンプルなGitHub Flow設定
+  - name: "nori-ut3g/simple-project"
+    enabled: false
+    labels: ["claude-auto"]
+    keywords: ["@claude-execute"]
+    branch_strategy: "github-flow"
+    base_branch: "main"
+    slack_channel: "#general"
+
+organizations:
+  # 例: Organization全体の監視設定
+  - name: "your-organization"
+    enabled: false
+    exclude_repos: 
+      - "legacy-*"        # レガシーリポジトリを除外
+      - "archive-*"       # アーカイブされたリポジトリを除外
+      - "test-*"          # テストリポジトリを除外
+    default_labels: 
+      - "claude-auto"
+    slack_channel: "#org-automation"
+    jira_project: "ORG"
+
+# ブランチ戦略の設定
+branch_strategies:
+  gitflow:
+    feature_prefix: "feature/"
+    bugfix_prefix: "bugfix/"
+    hotfix_prefix: "hotfix/"
+    release_prefix: "release/"
+    naming_pattern: "{prefix}claude-auto-issue-{number}"
+    
+  github_flow:
+    feature_prefix: "feature/"
+    naming_pattern: "{prefix}claude-auto-issue-{number}"
+    
+# ラベルによるブランチタイプの自動判定
+label_to_branch_type:
+  - labels: ["hotfix", "critical", "urgent"]
+    branch_type: "hotfix"
+  - labels: ["bug", "fix", "bugfix"]
+    branch_type: "bugfix"
+  - labels: ["feature", "enhancement", "new"]
+    branch_type: "feature"
+  - labels: ["release"]
+    branch_type: "release"
+
+# Issue/PRイベントの設定
+event_settings:
+  issue_events:
+    - "opened"
+    - "labeled"
+    - "edited"
+  pr_events:
+    - "opened"
+    - "synchronize"
+    - "labeled"
+  comment_triggers:
+    - "@claude-execute"
+    - "@claude-retry"
+    - "@claude-cancel"

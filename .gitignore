@@ -1,0 +1,41 @@
+# Logs
+logs/
+*.log
+
+# Workspace
+workspace/
+
+# Runtime files
+*.pid
+monitor.state
+execution_history.json
+
+# Lock files
+locks/
+
+# Pending events
+pending_events/
+
+# Environment files
+.env
+.env.local
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Credentials
+*.pem
+*.key
+.git-credentials
+
+# Backup files
+*.bak
+*~
+
+# Test files
+test-*
+tmp/

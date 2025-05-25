@@ -1,0 +1,228 @@
+# Claude Automation System - 外部サービス連携設定
+# Slack, Jira, GitHub APIなどの外部サービス設定
+
+# Slack連携設定
+slack:
+  enabled: true
+  webhook_url: "${SLACK_WEBHOOK_URL}"  # 環境変数から取得
+  default_channel: "#claude-automation"
+  
+  # チャンネル別設定
+  channels:
+    error: "#claude-errors"
+    success: "#claude-success"
+    review: "#dev-team"
+    critical: "#devops-alerts"
+  
+  # メンション設定
+  mention_users:
+    error: ["@devops-team", "@on-call"]
+    review: ["@developer-team"]
+    critical: ["@team-lead", "@devops-team"]
+  
+  # 通知テンプレート
+  templates:
+    execution_start: |
+      🤖 *Claude自動実行開始*
+      📋 Issue: #{issue_number} - {issue_title}
+      🔗 リポジトリ: {repository}
+      ⏰ 開始時刻: {start_time}
+      👤 要求者: {requested_by}
+    
+    execution_complete: |
+      ✅ *Claude自動実行完了*
+      📋 Issue: #{issue_number} - {issue_title}
+      🔗 作成PR: #{pr_number}
+      ⏱️ 実行時間: {execution_time}
+      👀 レビュー依頼: {reviewers}
+      📝 [PR を確認]({pr_url})
+    
+    execution_error: |
+      ❌ *Claude自動実行エラー*
+      📋 Issue: #{issue_number} - {issue_title}
+      🚨 エラー: {error_message}
+      🔧 対応: {suggested_action}
+      📝 [詳細を確認]({issue_url})
+  
+  # インタラクション設定
+  interactive:
+    enabled: true
+    actions:
+      - name: "approve"
+        text: "✅ 承認"
+        style: "primary"
+      - name: "reject"
+        text: "❌ 却下"
+        style: "danger"
+      - name: "retry"
+        text: "🔄 再実行"
+        style: "default"
+      - name: "view_details"
+        text: "📋 詳細確認"
+        style: "default"
+
+# Jira連携設定
+jira:
+  enabled: true
+  base_url: "${JIRA_BASE_URL}"
+  username: "${JIRA_USERNAME}"
+  api_token: "${JIRA_API_TOKEN}"
+  
+  # プロジェクト設定
+  default_project: "DEV"
+  project_mapping:
+    "nori-ut3g/claude-automation-test": "AUTO"
+    "your-organization/*": "ORG"
+  
+  # Issue設定
+  issue_type: "Task"
+  default_priority: "Medium"
+  labels: 
+    - "claude-automated"
+    - "github-sync"
+  
+  # フィールドマッピング
+  field_mapping:
+    summary: "github_issue_title"
+    description: |
+      h3. GitHub Issue 情報
+      * *Issue番号*: #{github_issue_number}
+      * *リポジトリ*: {github_repository}
+      * *作成者*: {github_author}
+      * *作成日時*: {github_created_at}
+      
+      h3. 元の説明
+      {github_issue_body}
+      
+      h3. Claude実行情報
+      * *実行ID*: {execution_id}
+      * *開始時刻*: {execution_start_time}
+    
+    # カスタムフィールド（環境に応じて調整）
+    custom_fields:
+      github_issue_url: "customfield_10001"
+      github_pr_url: "customfield_10002"
+      claude_execution_time: "customfield_10003"
+  
+  # ステータスマッピング
+  status_mapping:
+    github_to_jira:
+      "open": "To Do"
+      "in_progress": "In Progress"
+      "review": "In Review"
+      "merged": "Done"
+      "closed": "Done"
+    jira_to_github:
+      "To Do": "open"
+      "In Progress": "in_progress"
+      "In Review": "review"
+      "Done": "closed"
+  
+  # トランジション設定
+  transitions:
+    start_progress: "21"    # 「進行中」への遷移ID
+    submit_review: "31"     # 「レビュー中」への遷移ID
+    complete: "41"          # 「完了」への遷移ID
+
+# GitHub API設定
+github:
+  token: "${GITHUB_TOKEN}"
+  api_base: "https://api.github.com"
+  
+  # API制限設定
+  rate_limit:
+    max_retries: 3
+    retry_delay: 60         # 秒
+    rate_limit_wait: 300    # レート制限時の待機時間（秒）
+  
+  # PR設定
+  pr_settings:
+    draft: false            # ドラフトPRとして作成
+    auto_merge: false       # 自動マージを有効化
+    delete_branch: true     # マージ後にブランチを削除
+    
+  # コミット設定
+  commit_settings:
+    sign_commits: false     # GPG署名
+    commit_message_template: |
+      {type}: {description}
+      
+      Issue: #{issue_number}
+      
+      {extended_description}
+      
+      Co-authored-by: Claude <claude@anthropic.com>
+      Automated-by: Claude Automation System
+  
+  # ラベル設定
+  labels:
+    automated_pr: "claude-automated-pr"
+    in_progress: "claude-in-progress"
+    review_ready: "claude-review-ready"
+    error: "claude-error"
+
+# Claude設定
+claude:
+  # 実行設定
+  execution:
+    max_execution_time: 600  # 秒（10分）
+    max_retries: 2
+    retry_delay: 120         # 秒
+  
+  # コンテキスト設定
+  context:
+    max_file_size: 100000    # バイト
+    include_patterns:
+      - "*.py"
+      - "*.js"
+      - "*.ts"
+      - "*.java"
+      - "*.go"
+      - "*.md"
+      - "*.yml"
+      - "*.yaml"
+      - "*.json"
+    exclude_patterns:
+      - "node_modules/**"
+      - "dist/**"
+      - "build/**"
+      - ".git/**"
+      - "*.min.js"
+      - "*.min.css"
+
+# ログ設定
+logging:
+  level: "INFO"              # DEBUG, INFO, WARN, ERROR
+  max_file_size: "10M"       # ログファイルの最大サイズ
+  max_files: 10              # 保持するログファイル数
+  format: "[%datetime%] [%level%] [%component%] %message%"
+  
+  # コンポーネント別ログレベル
+  components:
+    monitor: "INFO"
+    event_processor: "DEBUG"
+    claude_executor: "INFO"
+    slack_client: "INFO"
+    jira_client: "DEBUG"
+    github_client: "INFO"
+
+# セキュリティ設定
+security:
+  # 機密情報のマスキング
+  mask_patterns:
+    - "token"
+    - "password"
+    - "api_key"
+    - "secret"
+  
+  # 実行権限
+  allowed_users:
+    - "nori-ut3g"
+    - "developer-team"
+  
+  # 実行可能なアクション
+  allowed_actions:
+    - "create_pr"
+    - "update_issue"
+    - "add_comment"
+    - "create_branch"
