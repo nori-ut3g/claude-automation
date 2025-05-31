@@ -294,21 +294,29 @@ record_session_info() {
     
     # セッション情報を記録
     local session_info
-    session_info=$(cat << EOF
-{
-  "session_id": "$SESSION_ID",
-  "project_path": "$PROJECT_PATH",
-  "prompt_text": "$PROMPT_TEXT",
-  "terminal_type": "$TERMINAL_TYPE",
-  "prompt_file": "$prompt_file",
-  "started_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-  "status": "launched"
-}
-EOF
-    )
+    local started_at
+    started_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    session_info=$(jq -nc \
+        --arg session_id "$SESSION_ID" \
+        --arg project_path "$PROJECT_PATH" \
+        --arg prompt_text "$PROMPT_TEXT" \
+        --arg terminal_type "$TERMINAL_TYPE" \
+        --arg prompt_file "$prompt_file" \
+        --arg started_at "$started_at" \
+        --arg status "launched" \
+        '{
+            session_id: $session_id,
+            project_path: $project_path,
+            prompt_text: $prompt_text,
+            terminal_type: $terminal_type,
+            prompt_file: $prompt_file,
+            started_at: $started_at,
+            status: $status
+        }')
     
     # JSONファイルに追加
-    jq ". += [$session_info]" "$session_log" > "${session_log}.tmp" && mv "${session_log}.tmp" "$session_log"
+    local temp_file="${session_log}.tmp"
+    jq --argjson new_session "$session_info" '. += [$new_session]' "$session_log" > "$temp_file" && mv "$temp_file" "$session_log"
     
     log_info "Session info recorded: $session_log"
 }

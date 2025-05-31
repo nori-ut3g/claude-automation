@@ -455,17 +455,22 @@ cleanup() {
             # ワークスペース情報をファイルに記録
             local workspace_info="${CLAUDE_AUTO_HOME}/logs/active_workspaces.json"
             local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-            local workspace_entry=$(cat <<EOF
-{
-    "workspace_path": "$WORKSPACE_DIR",
-    "repository": "$REPOSITORY",
-    "issue_number": $ISSUE_NUMBER,
-    "branch_name": "$BRANCH_NAME",
-    "created_at": "$timestamp",
-    "execution_id": "$EXECUTION_ID"
-}
-EOF
-            )
+            local workspace_entry
+            workspace_entry=$(jq -nc \
+                --arg workspace_path "$WORKSPACE_DIR" \
+                --arg repository "$REPOSITORY" \
+                --argjson issue_number "$ISSUE_NUMBER" \
+                --arg branch_name "$BRANCH_NAME" \
+                --arg created_at "$timestamp" \
+                --arg execution_id "$EXECUTION_ID" \
+                '{
+                    workspace_path: $workspace_path,
+                    repository: $repository,
+                    issue_number: $issue_number,
+                    branch_name: $branch_name,
+                    created_at: $created_at,
+                    execution_id: $execution_id
+                }')
             
             # アクティブワークスペースファイルが存在しない場合は作成
             if [[ ! -f "$workspace_info" ]]; then
@@ -612,19 +617,19 @@ Claude Codeが自動的にタスクを実行し、完了後にプルリクエス
             # jqを使って安全にJSONエントリを追加
             local temp_file="${execution_history_file}.tmp"
             jq --arg repo "$REPOSITORY" \
-               --arg issue_number "$ISSUE_NUMBER" \
+               --argjson issue_number "$ISSUE_NUMBER" \
                --arg status "completed" \
                --arg created_at "$timestamp" \
                --arg updated_at "$timestamp" \
-               --arg retry_count "0" \
+               --argjson retry_count "0" \
                --arg details "Terminal session launched - manual intervention required" \
                '. += [{
                    repo: $repo,
-                   issue_number: ($issue_number | tonumber),
+                   issue_number: $issue_number,
                    status: $status,
                    created_at: $created_at,
                    updated_at: $updated_at,
-                   retry_count: ($retry_count | tonumber),
+                   retry_count: $retry_count,
                    details: $details
                }]' "$execution_history_file" > "$temp_file" && mv "$temp_file" "$execution_history_file"
         fi

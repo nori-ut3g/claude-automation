@@ -601,18 +601,23 @@ process_issue_event() {
         log_info "Handling as reply request for Issue #${issue_number}"
         
         local reply_params
-        reply_params=$(cat <<EOF
-{
-    "event_type": "reply",
-    "repository": "$REPO_NAME",
-    "issue_number": $issue_number,
-    "issue_title": $(echo "$issue_title" | jq -Rs .),
-    "issue_body": $(echo "$issue_body" | jq -Rs .),
-    "issue_labels": $(echo "$issue_labels" | jq -Rs .),
-    "found_keyword": $(echo "$found_keyword" | jq -Rs .)
-}
-EOF
-        )
+        reply_params=$(jq -nc \
+            --arg event_type "reply" \
+            --arg repository "$REPO_NAME" \
+            --argjson issue_number "$issue_number" \
+            --arg issue_title "$issue_title" \
+            --arg issue_body "$issue_body" \
+            --arg issue_labels "$issue_labels" \
+            --arg found_keyword "$found_keyword" \
+            '{
+                event_type: $event_type,
+                repository: $repository,
+                issue_number: $issue_number,
+                issue_title: $issue_title,
+                issue_body: $issue_body,
+                issue_labels: $issue_labels,
+                found_keyword: $found_keyword
+            }')
         
         local claude_reply="${CLAUDE_AUTO_HOME}/src/core/claude-reply.sh"
         
@@ -635,23 +640,35 @@ EOF
         log_info "Handling as terminal execution request for Issue #${issue_number}"
         
         local execution_params
-        execution_params=$(cat <<EOF
-{
-    "event_type": "issue",
-    "repository": "$REPO_NAME",
-    "issue_number": $issue_number,
-    "issue_title": $(echo "$issue_title" | jq -Rs .),
-    "issue_body": $(echo "$issue_body" | jq -Rs .),
-    "issue_labels": $(echo "$issue_labels" | jq -Rs .),
-    "branch_name": "$branch_name",
-    "branch_strategy": "$branch_strategy",
-    "branch_type": "$branch_type",
-    "base_branch": $(echo "$repo_config" | jq -r '.base_branch // "main"' | jq -Rs .),
-    "found_keyword": $(echo "$found_keyword" | jq -Rs .),
-    "execution_mode": "terminal"
-}
-EOF
-        )
+        local base_branch
+        base_branch=$(echo "$repo_config" | jq -r '.base_branch // "main"')
+        execution_params=$(jq -nc \
+            --arg event_type "issue" \
+            --arg repository "$REPO_NAME" \
+            --argjson issue_number "$issue_number" \
+            --arg issue_title "$issue_title" \
+            --arg issue_body "$issue_body" \
+            --arg issue_labels "$issue_labels" \
+            --arg branch_name "$branch_name" \
+            --arg branch_strategy "$branch_strategy" \
+            --arg branch_type "$branch_type" \
+            --arg base_branch "$base_branch" \
+            --arg found_keyword "$found_keyword" \
+            --arg execution_mode "terminal" \
+            '{
+                event_type: $event_type,
+                repository: $repository,
+                issue_number: $issue_number,
+                issue_title: $issue_title,
+                issue_body: $issue_body,
+                issue_labels: $issue_labels,
+                branch_name: $branch_name,
+                branch_strategy: $branch_strategy,
+                branch_type: $branch_type,
+                base_branch: $base_branch,
+                found_keyword: $found_keyword,
+                execution_mode: $execution_mode
+            }')
         
         local claude_executor="${CLAUDE_AUTO_HOME}/src/core/claude-executor.sh"
         
@@ -674,22 +691,33 @@ EOF
         log_info "Handling as implementation request for Issue #${issue_number}"
         
         local execution_params
-        execution_params=$(cat <<EOF
-{
-    "event_type": "issue",
-    "repository": "$REPO_NAME",
-    "issue_number": $issue_number,
-    "issue_title": $(echo "$issue_title" | jq -Rs .),
-    "issue_body": $(echo "$issue_body" | jq -Rs .),
-    "issue_labels": $(echo "$issue_labels" | jq -Rs .),
-    "branch_name": "$branch_name",
-    "branch_strategy": "$branch_strategy",
-    "branch_type": "$branch_type",
-    "base_branch": $(echo "$repo_config" | jq -r '.base_branch // "main"' | jq -Rs .),
-    "found_keyword": $(echo "$found_keyword" | jq -Rs .)
-}
-EOF
-        )
+        local base_branch
+        base_branch=$(echo "$repo_config" | jq -r '.base_branch // "main"')
+        execution_params=$(jq -nc \
+            --arg event_type "issue" \
+            --arg repository "$REPO_NAME" \
+            --argjson issue_number "$issue_number" \
+            --arg issue_title "$issue_title" \
+            --arg issue_body "$issue_body" \
+            --arg issue_labels "$issue_labels" \
+            --arg branch_name "$branch_name" \
+            --arg branch_strategy "$branch_strategy" \
+            --arg branch_type "$branch_type" \
+            --arg base_branch "$base_branch" \
+            --arg found_keyword "$found_keyword" \
+            '{
+                event_type: $event_type,
+                repository: $repository,
+                issue_number: $issue_number,
+                issue_title: $issue_title,
+                issue_body: $issue_body,
+                issue_labels: $issue_labels,
+                branch_name: $branch_name,
+                branch_strategy: $branch_strategy,
+                branch_type: $branch_type,
+                base_branch: $base_branch,
+                found_keyword: $found_keyword
+            }')
         
         local claude_executor="${CLAUDE_AUTO_HOME}/src/core/claude-executor.sh"
         
@@ -784,18 +812,25 @@ process_pr_event() {
     
     # Claude実行パラメータを準備
     local execution_params
-    execution_params=$(cat <<EOF
-{
-    "event_type": "pull_request",
-    "repository": "$REPO_NAME",
-    "pr_number": $pr_number,
-    "pr_title": $(echo "$pr_title" | jq -Rs .),
-    "pr_body": $(echo "$pr_body" | jq -Rs .),
-    "pr_labels": $(echo "$pr_labels" | jq -Rs .),
-    "pr_branch": $(echo "$pr_data" | jq -r '.head.ref' | jq -Rs .)
-}
-EOF
-    )
+    local pr_branch
+    pr_branch=$(echo "$pr_data" | jq -r '.head.ref')
+    execution_params=$(jq -nc \
+        --arg event_type "pull_request" \
+        --arg repository "$REPO_NAME" \
+        --argjson pr_number "$pr_number" \
+        --arg pr_title "$pr_title" \
+        --arg pr_body "$pr_body" \
+        --arg pr_labels "$pr_labels" \
+        --arg pr_branch "$pr_branch" \
+        '{
+            event_type: $event_type,
+            repository: $repository,
+            pr_number: $pr_number,
+            pr_title: $pr_title,
+            pr_body: $pr_body,
+            pr_labels: $pr_labels,
+            pr_branch: $pr_branch
+        }')
     
     # Claude実行
     local claude_executor="${CLAUDE_AUTO_HOME}/src/core/claude-executor.sh"

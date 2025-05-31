@@ -474,15 +474,23 @@ monitor_loop() {
             else
                 # デフォルト設定で処理
                 local default_config
-                default_config=$(cat <<EOF
-{
-  "labels": $(get_config_array "default_settings.default_labels" "repositories" | jq -R . | jq -s .),
-  "keywords": $(get_config_array "default_settings.default_keywords" "repositories" | jq -R . | jq -s .),
-  "branch_strategy": "$(get_config_value "default_settings.branch_strategy" "github-flow" "repositories")",
-  "base_branch": "$(get_config_value "default_settings.base_branch" "main" "repositories")"
-}
-EOF
-                )
+                local default_labels default_keywords default_branch_strategy default_base_branch
+                default_labels=$(get_config_array "default_settings.default_labels" "repositories" | jq -R . | jq -s .)
+                default_keywords=$(get_config_array "default_settings.default_keywords" "repositories" | jq -R . | jq -s .)
+                default_branch_strategy=$(get_config_value "default_settings.branch_strategy" "github-flow" "repositories")
+                default_base_branch=$(get_config_value "default_settings.base_branch" "main" "repositories")
+                
+                default_config=$(jq -nc \
+                    --argjson labels "$default_labels" \
+                    --argjson keywords "$default_keywords" \
+                    --arg branch_strategy "$default_branch_strategy" \
+                    --arg base_branch "$default_base_branch" \
+                    '{
+                        labels: $labels,
+                        keywords: $keywords,
+                        branch_strategy: $branch_strategy,
+                        base_branch: $base_branch
+                    }')
                 check_repository_events "$repo" "$default_config"
             fi
             
