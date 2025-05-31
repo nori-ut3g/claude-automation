@@ -48,6 +48,7 @@ repositories:
     reply_keywords:
       - "@claude-execute"
       - "@claude-reply"
+      - "@claude-explain"
       - "@claude-discuss"
       - "@claude-analysis"
     terminal_keywords:

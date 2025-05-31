@@ -12,6 +12,7 @@ Claude DevOps Automation Systemは、GitHubのIssueやPull Requestを監視し�
 - 🤖 **Claude自動実行**: IssueからのClaude Code実行とPR作成
 - 💻 **Terminal自動起動**: Claude Codeの対話的セッションを自動開始
 - 💬 **智的な返信**: 議論や分析要求への自動応答
+- 📝 **コメントメンション**: Issue内コメントでのリアルタイムClaude呼び出し
 - 🌿 **高度なGitワークフロー**: Git-flow、GitHub Flow対応
 - 📊 **ワークスペース管理**: 効率的な作業ディレクトリ管理
 - 💬 **Slack連携**: 実行状況の通知とインタラクティブな操作
@@ -197,6 +198,34 @@ How to implement caching strategy?
 1. リポジトリクローンをスキップ
 2. Claude Codeで返信を生成
 3. GitHub Issueに自動コメント投稿
+
+## コメントメンション機能
+
+Issue内のコメントでClaudeを呼び出せます。Issue本文だけでなく、議論の流れの中で動的にClaudeを活用できます。
+
+### 基本的な使用方法
+
+Issue内のコメントで以下のようにメンション：
+
+```markdown
+@claude-explain 
+分子動力学法で使用される具体的なアルゴリズム（Verlet法など）について説明してください。
+```
+
+### サポートされるキーワード
+
+**返信系**: `@claude-explain`, `@claude-reply`, `@claude-discuss`, `@claude-analysis`
+**実装系**: `@claude-implement`, `@claude-create`, `@claude-fix`  
+**Terminal系**: `@claude-terminal`, `@claude-interactive`
+
+### 特徴
+
+- 🎯 **コンテキスト認識**: Issue全体の文脈を理解した返信
+- ⚡ **リアルタイム処理**: コメント投稿後60秒以内で自動検出
+- 🔄 **独立実行**: Issue本文の処理状況に関係なく実行
+- 💬 **投稿者対応**: コメント投稿者に向けた個別返信
+
+詳細は [コメントメンション機能ガイド](docs/COMMENT-MENTIONS.md) を参照してください。
 
 ## ワークスペース管理
 
@@ -432,12 +461,20 @@ MIT License
 Issues、Pull Requestsは歓迎します。
 大きな変更を行う場合は、まずIssueで議論してください。
 
+## ドキュメント
+
+- [コメントメンション機能ガイド](docs/COMMENT-MENTIONS.md)
+- [操作ガイド](docs/OPERATIONS.md)
+- [設定リファレンス](config/)
+- [CHANGELOG](CHANGELOG.md)
+
 ## サポート
 
 問題が発生した場合は、以下をご確認ください:
 
 1. [トラブルシューティング](#トラブルシューティング)セクション
-2. GitHubのIssuesページ
+2. [コメントメンション機能ガイド](docs/COMMENT-MENTIONS.md)のトラブルシューティング
+3. GitHubのIssuesページ
 3. ログファイル（`logs/`ディレクトリ）
 4. [Claude Code documentation](https://docs.anthropic.com/claude/docs)
 

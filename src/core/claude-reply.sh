@@ -44,6 +44,17 @@ extract_issue_info() {
     ISSUE_BODY=$(echo "$EXECUTION_PARAMS" | jq -r '.issue_body')
     FOUND_KEYWORD=$(echo "$EXECUTION_PARAMS" | jq -r '.found_keyword // ""')
     
+    # コメントトリガー情報の抽出
+    TRIGGER_COMMENT=$(echo "$EXECUTION_PARAMS" | jq -r '.trigger_comment // empty')
+    COMMENT_BODY=""
+    COMMENT_AUTHOR=""
+    
+    if [[ -n "$TRIGGER_COMMENT" ]]; then
+        COMMENT_BODY=$(echo "$TRIGGER_COMMENT" | jq -r '.body // ""')
+        COMMENT_AUTHOR=$(echo "$TRIGGER_COMMENT" | jq -r '.author // ""')
+        log_info "Comment-triggered reply requested by $COMMENT_AUTHOR"
+    fi
+    
     log_info "Processing reply for Issue #${ISSUE_NUMBER} in ${REPOSITORY}"
     log_info "Found keyword: ${FOUND_KEYWORD}"
 }
@@ -51,11 +62,39 @@ extract_issue_info() {
 # 返信プロンプトの生成
 generate_reply_prompt() {
     local prompt_template
-    prompt_template=$(get_config_value "claude.reply_prompt_template" "" "claude-prompts")
     
-    if [[ -z "$prompt_template" ]]; then
-        # デフォルトの返信プロンプト
-        prompt_template="GitHubのIssueに対して適切な返信を生成してください。
+    # コメントトリガーの場合は別のプロンプトを使用
+    if [[ -n "$COMMENT_BODY" ]]; then
+        prompt_template=$(get_config_value "claude.comment_reply_prompt_template" "" "claude-prompts")
+        
+        if [[ -z "$prompt_template" ]]; then
+            # デフォルトのコメント返信プロンプト
+            prompt_template="GitHubのIssueのコメントに対して適切な返信を生成してください。
+
+Issue情報:
+- タイトル: {{ISSUE_TITLE}}
+- 本文: {{ISSUE_BODY}}
+
+コメント情報:
+- コメント投稿者: {{COMMENT_AUTHOR}}
+- コメント内容: {{COMMENT_BODY}}
+- 見つかったキーワード: {{FOUND_KEYWORD}}
+
+以下の点を考慮して返信してください:
+1. コメント投稿者（{{COMMENT_AUTHOR}}）への直接的な返信として書く
+2. コメントの内容に具体的に対応する
+3. 技術的な質問には具体的な回答を提供する
+4. 不明な点がある場合は追加情報を求める
+5. 必要に応じて参考リンクや資料を提供する
+
+返信のみを出力してください（マークダウン形式で）。"
+        fi
+    else
+        prompt_template=$(get_config_value "claude.reply_prompt_template" "" "claude-prompts")
+        
+        if [[ -z "$prompt_template" ]]; then
+            # デフォルトの返信プロンプト
+            prompt_template="GitHubのIssueに対して適切な返信を生成してください。
 
 Issue情報:
 - タイトル: {{ISSUE_TITLE}}
@@ -69,6 +108,7 @@ Issue情報:
 4. 必要に応じて参考リンクや資料を提供する
 
 返信のみを出力してください（マークダウン形式で）。"
+        fi
     fi
     
     # プレースホルダーの置換
@@ -79,6 +119,8 @@ Issue情報:
     detailed_prompt="${detailed_prompt//\{\{FOUND_KEYWORD\}\}/$FOUND_KEYWORD}"
     detailed_prompt="${detailed_prompt//\{\{REPOSITORY\}\}/$REPOSITORY}"
     detailed_prompt="${detailed_prompt//\{\{ISSUE_NUMBER\}\}/$ISSUE_NUMBER}"
+    detailed_prompt="${detailed_prompt//\{\{COMMENT_BODY\}\}/$COMMENT_BODY}"
+    detailed_prompt="${detailed_prompt//\{\{COMMENT_AUTHOR\}\}/$COMMENT_AUTHOR}"
     
     echo "$detailed_prompt"
 }

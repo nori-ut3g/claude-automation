@@ -506,6 +506,18 @@ process_issue_event() {
     local found_keyword
     found_keyword=$(echo "$issue_data" | jq -r '.found_keyword // ""')
     
+    # コメントトリガーの情報を抽出
+    local trigger_comment
+    trigger_comment=$(echo "$issue_data" | jq -r '.trigger_comment // empty')
+    local comment_body=""
+    local comment_author=""
+    
+    if [[ -n "$trigger_comment" ]]; then
+        comment_body=$(echo "$trigger_comment" | jq -r '.body // ""')
+        comment_author=$(echo "$trigger_comment" | jq -r '.author // ""')
+        log_info "Comment-triggered event by $comment_author"
+    fi
+    
     log_info "Processing Issue #${issue_number}: ${issue_title}"
     log_info "Issue state: '$issue_state'"
     log_info "Keyword type: '$keyword_type'"
@@ -533,9 +545,13 @@ process_issue_event() {
     
     log_info "Proceeding to process OPEN issue #${issue_number}"
     
-    # 実行履歴をチェック
-    if check_execution_history "$issue_number" "$REPO_NAME"; then
-        return 0
+    # 実行履歴をチェック（コメントトリガーの場合はスキップ）
+    if [[ -z "$comment_body" ]]; then
+        if check_execution_history "$issue_number" "$REPO_NAME"; then
+            return 0
+        fi
+    else
+        log_info "Comment-triggered event - skipping execution history check"
     fi
     
     # 古いロックのクリーンアップを実行
@@ -601,23 +617,51 @@ process_issue_event() {
         log_info "Handling as reply request for Issue #${issue_number}"
         
         local reply_params
-        reply_params=$(jq -nc \
-            --arg event_type "reply" \
-            --arg repository "$REPO_NAME" \
-            --argjson issue_number "$issue_number" \
-            --arg issue_title "$issue_title" \
-            --arg issue_body "$issue_body" \
-            --arg issue_labels "$issue_labels" \
-            --arg found_keyword "$found_keyword" \
-            '{
-                event_type: $event_type,
-                repository: $repository,
-                issue_number: $issue_number,
-                issue_title: $issue_title,
-                issue_body: $issue_body,
-                issue_labels: $issue_labels,
-                found_keyword: $found_keyword
-            }')
+        
+        # コメントトリガーの場合は、コメント情報も含める
+        if [[ -n "$comment_body" ]]; then
+            reply_params=$(jq -nc \
+                --arg event_type "reply" \
+                --arg repository "$REPO_NAME" \
+                --argjson issue_number "$issue_number" \
+                --arg issue_title "$issue_title" \
+                --arg issue_body "$issue_body" \
+                --arg issue_labels "$issue_labels" \
+                --arg found_keyword "$found_keyword" \
+                --arg comment_body "$comment_body" \
+                --arg comment_author "$comment_author" \
+                '{
+                    event_type: $event_type,
+                    repository: $repository,
+                    issue_number: $issue_number,
+                    issue_title: $issue_title,
+                    issue_body: $issue_body,
+                    issue_labels: $issue_labels,
+                    found_keyword: $found_keyword,
+                    trigger_comment: {
+                        body: $comment_body,
+                        author: $comment_author
+                    }
+                }')
+        else
+            reply_params=$(jq -nc \
+                --arg event_type "reply" \
+                --arg repository "$REPO_NAME" \
+                --argjson issue_number "$issue_number" \
+                --arg issue_title "$issue_title" \
+                --arg issue_body "$issue_body" \
+                --arg issue_labels "$issue_labels" \
+                --arg found_keyword "$found_keyword" \
+                '{
+                    event_type: $event_type,
+                    repository: $repository,
+                    issue_number: $issue_number,
+                    issue_title: $issue_title,
+                    issue_body: $issue_body,
+                    issue_labels: $issue_labels,
+                    found_keyword: $found_keyword
+                }')
+        fi
         
         local claude_reply="${CLAUDE_AUTO_HOME}/src/core/claude-reply.sh"
         

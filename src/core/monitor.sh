@@ -149,6 +149,9 @@ check_repository_events() {
     # Issue のチェック
     check_issues "$repo_name" "$labels" "$impl_keywords" "$reply_keywords" "$terminal_keywords" "$last_check"
     
+    # Issue コメントのチェック（Issue処理後に実行）
+    check_issue_comments "$repo_name" "$labels" "$impl_keywords" "$reply_keywords" "$terminal_keywords"
+    
     # Pull Request のチェック
     check_pull_requests "$repo_name" "$labels" "$impl_keywords" "$reply_keywords" "$terminal_keywords" "$last_check"
     
@@ -277,6 +280,145 @@ check_issues() {
     done
 }
 
+# Issue コメントのチェック
+check_issue_comments() {
+    local repo_name=$1
+    local labels=$2
+    local impl_keywords=$3
+    local reply_keywords=$4
+    local terminal_keywords=$5
+    
+    log_info "Checking comments for issues in $repo_name"
+    
+    # コメント追跡ファイル
+    local comment_tracker="${CLAUDE_AUTO_HOME}/comment_tracker.json"
+    
+    # 追跡ファイルが存在しない場合は作成
+    if [[ ! -f "$comment_tracker" ]]; then
+        echo '{"repositories":{}}' > "$comment_tracker"
+    fi
+    
+    # このリポジトリの最後のチェック時刻を取得
+    local last_check
+    last_check=$(jq -r ".repositories[\"$repo_name\"].last_check // \"1970-01-01T00:00:00Z\"" "$comment_tracker")
+    
+    # claude-autoラベルのついたオープンIssueを取得
+    local issues
+    if ! issues=$(gh issue list --repo "$repo_name" --state open --label "claude-auto" --json number,title,labels); then
+        log_error "Failed to fetch issues for comment check"
+        return 1
+    fi
+    
+    # 各Issueのコメントをチェック
+    echo "$issues" | jq -c '.[]' | while read -r issue; do
+        local issue_number
+        issue_number=$(echo "$issue" | jq -r '.number')
+        
+        # このIssueのコメントを取得
+        local comments
+        if ! comments=$(gh api "repos/$repo_name/issues/$issue_number/comments" --jq '.[] | select(.created_at > "'"$last_check"'")'); then
+            log_warn "Failed to fetch comments for issue #$issue_number"
+            continue
+        fi
+        
+        # 新しいコメントがある場合のみ処理
+        if [[ -n "$comments" ]]; then
+            echo "$comments" | jq -s '.' | jq -c '.[]' | while read -r comment; do
+                local comment_body
+                comment_body=$(echo "$comment" | jq -r '.body')
+                local comment_author
+                comment_author=$(echo "$comment" | jq -r '.user.login')
+                local comment_created
+                comment_created=$(echo "$comment" | jq -r '.created_at')
+                
+                log_info "Checking comment on issue #$issue_number by $comment_author"
+                
+                # キーワードチェック
+                local keyword_type=""
+                local found_keyword=""
+                
+                # 実装キーワードをチェック
+                if [[ -n "$impl_keywords" ]]; then
+                    while IFS= read -r keyword; do
+                        keyword=$(echo "$keyword" | xargs)
+                        if [[ -n "$keyword" ]] && [[ "$comment_body" == *"$keyword"* ]]; then
+                            log_info "Found implementation keyword '$keyword' in comment on issue #$issue_number"
+                            keyword_type="implementation"
+                            found_keyword="$keyword"
+                            break
+                        fi
+                    done <<< "$impl_keywords"
+                fi
+                
+                # 返信キーワードをチェック
+                if [[ -z "$keyword_type" ]] && [[ -n "$reply_keywords" ]]; then
+                    while IFS= read -r keyword; do
+                        keyword=$(echo "$keyword" | xargs)
+                        if [[ -n "$keyword" ]] && [[ "$comment_body" == *"$keyword"* ]]; then
+                            log_info "Found reply keyword '$keyword' in comment on issue #$issue_number"
+                            keyword_type="reply"
+                            found_keyword="$keyword"
+                            break
+                        fi
+                    done <<< "$reply_keywords"
+                fi
+                
+                # Terminalキーワードをチェック
+                if [[ -z "$keyword_type" ]] && [[ -n "$terminal_keywords" ]]; then
+                    while IFS= read -r keyword; do
+                        keyword=$(echo "$keyword" | xargs)
+                        if [[ -n "$keyword" ]] && [[ "$comment_body" == *"$keyword"* ]]; then
+                            log_info "Found terminal keyword '$keyword' in comment on issue #$issue_number"
+                            keyword_type="terminal"
+                            found_keyword="$keyword"
+                            break
+                        fi
+                    done <<< "$terminal_keywords"
+                fi
+                
+                # キーワードが見つかった場合
+                if [[ -n "$keyword_type" ]]; then
+                    # Issueの詳細情報を取得
+                    local issue_detail
+                    if ! issue_detail=$(gh issue view "$issue_number" --repo "$repo_name" --json number,title,body,labels,state); then
+                        log_error "Failed to fetch issue details for #$issue_number"
+                        continue
+                    fi
+                    
+                    # コメント情報を追加
+                    local enhanced_issue
+                    enhanced_issue=$(echo "$issue_detail" | jq \
+                        --arg kt "$keyword_type" \
+                        --arg fk "$found_keyword" \
+                        --arg cb "$comment_body" \
+                        --arg ca "$comment_author" \
+                        --arg cc "$comment_created" \
+                        '. + {
+                            keyword_type: $kt,
+                            found_keyword: $fk,
+                            trigger_comment: {
+                                body: $cb,
+                                author: $ca,
+                                created_at: $cc
+                            }
+                        }')
+                    
+                    log_info "Processing comment-triggered event for issue #$issue_number (type: $keyword_type)"
+                    process_event "issue" "$repo_name" "$enhanced_issue"
+                fi
+            done
+        fi
+    done
+    
+    # 最後のチェック時刻を更新
+    local current_time
+    current_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local temp_file="${comment_tracker}.tmp"
+    jq --arg repo "$repo_name" --arg time "$current_time" \
+        '.repositories[$repo] = {last_check: $time}' "$comment_tracker" > "$temp_file" && \
+        mv "$temp_file" "$comment_tracker"
+}
+
 # Pull Request のチェック
 check_pull_requests() {
     local repo_name=$1
@@ -356,7 +498,13 @@ process_event() {
     local event_processor="${CLAUDE_AUTO_HOME}/src/core/event-processor.sh"
     
     if [[ -x "$event_processor" ]]; then
-        echo "$event_data" | "$event_processor" "$event_type" "$repo_name"
+        # バックグラウンドで非同期実行
+        (
+            echo "$event_data" | "$event_processor" "$event_type" "$repo_name"
+        ) &
+        
+        local pid=$!
+        log_info "Started event processor in background (PID: $pid) for $event_type in $repo_name"
     else
         log_warn "Event processor not found or not executable: $event_processor"
         
