@@ -14,6 +14,7 @@ CLAUDE_AUTO_HOME="${CLAUDE_AUTO_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../..
 source "${CLAUDE_AUTO_HOME}/src/utils/logger.sh"
 source "${CLAUDE_AUTO_HOME}/src/utils/config-loader.sh"
 source "${CLAUDE_AUTO_HOME}/src/utils/git-utils.sh"
+source "${CLAUDE_AUTO_HOME}/src/integrations/github-client.sh"
 
 # 定数
 readonly WORKSPACE_BASE="${CLAUDE_AUTO_HOME}/workspace"
@@ -24,6 +25,7 @@ readonly MAX_EXECUTION_TIME=600  # 10分
 EXECUTION_PARAMS=""
 WORKSPACE_DIR=""
 EXECUTION_ID=""
+EXECUTION_MODE="batch"  # batch, terminal, interactive
 
 # 初期化
 initialize() {
@@ -38,6 +40,12 @@ initialize() {
     
     # ワークスペースディレクトリの作成
     mkdir -p "$WORKSPACE_BASE"
+    
+    # ワークスペースの権限確認
+    if [[ ! -w "$WORKSPACE_BASE" ]]; then
+        log_error "Workspace directory is not writable: $WORKSPACE_BASE"
+        return 1
+    fi
     
     log_info "Claude executor initialized (ID: $EXECUTION_ID)"
 }
@@ -55,6 +63,13 @@ parse_execution_params() {
             ISSUE_BODY=$(echo "$EXECUTION_PARAMS" | jq -r '.issue_body')
             BRANCH_NAME=$(echo "$EXECUTION_PARAMS" | jq -r '.branch_name')
             BASE_BRANCH=$(echo "$EXECUTION_PARAMS" | jq -r '.base_branch')
+            
+            # 実行モードの取得（JSONパラメータから）
+            local json_execution_mode
+            json_execution_mode=$(echo "$EXECUTION_PARAMS" | jq -r '.execution_mode // ""')
+            if [[ -n "$json_execution_mode" ]]; then
+                EXECUTION_MODE="$json_execution_mode"
+            fi
             ;;
         "pull_request")
             PR_NUMBER=$(echo "$EXECUTION_PARAMS" | jq -r '.pr_number')
@@ -71,10 +86,21 @@ parse_execution_params() {
 
 # リポジトリのセットアップ
 setup_repository() {
-    local repo_url="https://github.com/${REPOSITORY}.git"
-    WORKSPACE_DIR="${WORKSPACE_BASE}/${EXECUTION_ID}_${REPOSITORY//\//_}"
+    # 返信のみモードの場合はクローン不要
+    if [[ "$EXECUTION_MODE" == "reply" ]]; then
+        log_info "Reply mode - skipping repository clone"
+        WORKSPACE_DIR=""  # ワークスペースなし
+        return 0
+    fi
     
-    log_info "Setting up repository: $REPOSITORY"
+    local repo_url="https://github.com/${REPOSITORY}.git"
+    
+    # 適切なワークスペースディレクトリ名を生成
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    local sanitized_repo=${REPOSITORY//\//_}
+    WORKSPACE_DIR="${WORKSPACE_BASE}/${timestamp}_${sanitized_repo}"
+    
+    log_info "Setting up repository: $REPOSITORY in $WORKSPACE_DIR"
     
     # GitHubトークンの設定
     setup_github_auth || return 1
@@ -166,9 +192,6 @@ execute_claude() {
     
     log_info "Executing Claude Code..."
     
-    # Claude実行コマンドの構築
-    local claude_cmd="claude"
-    
     # プロンプトファイルの作成
     local prompt_file="${WORKSPACE_DIR}/.claude_prompt"
     echo "$prompt" > "$prompt_file"
@@ -176,37 +199,50 @@ execute_claude() {
     # タイムアウト付きでClaude実行
     local start_time=$(date +%s)
     
-    # Claude実行（実際の実装では、Claude APIやCLIを使用）
-    # ここでは仮の実装として、プロンプトに基づいてファイルを作成
-    if [[ "$EVENT_TYPE" == "issue" ]]; then
-        # 実装の仮シミュレーション
-        log_info "Simulating Claude implementation..."
-        
-        # 実装ファイルの作成（例）
-        case "$ISSUE_TITLE" in
-            *"Add"*|*"Create"*|*"Implement"*)
-                # 新機能の追加をシミュレート
-                create_sample_implementation
-                ;;
-            *"Fix"*|*"Bug"*)
-                # バグ修正をシミュレート
-                create_sample_bugfix
-                ;;
-            *)
-                # デフォルトの実装
-                create_default_implementation
-                ;;
-        esac
+    # 実際のClaude Code実行
+    log_info "Running Claude Code in workspace: $WORKSPACE_DIR"
+    
+    # より詳細なプロンプトを作成
+    local detailed_prompt
+    detailed_prompt="I am working on a GitHub issue that needs to be addressed. Here are the details:
+
+Repository: $REPOSITORY
+Issue #$ISSUE_NUMBER: $ISSUE_TITLE
+
+Issue Description:
+$ISSUE_BODY
+
+Please help me implement the solution for this issue. I'm currently in the project workspace and have access to all the files. Please analyze the request and implement the necessary changes.
+
+If you need to see the current project structure, create files, or make modifications, please go ahead and do so. I'm ready to work on this with you."
+
+    # プロンプトを標準入力として渡してClaude Codeを実行
+    if timeout $MAX_EXECUTION_TIME bash -c "cd '$WORKSPACE_DIR' && echo '$detailed_prompt' | claude" > "$claude_log" 2>&1; then
+        log_info "Claude Code execution successful"
         
         # 実行時間の記録
         local end_time=$(date +%s)
         local execution_time=$((end_time - start_time))
         log_info "Claude execution completed in ${execution_time} seconds"
         
+        # Claudeの出力をログに記録
+        log_info "Claude output logged to: $claude_log"
+        
         return 0
+    else
+        local exit_code=$?
+        log_error "Claude Code execution failed (exit code: $exit_code)"
+        
+        # エラーログを表示
+        if [[ -f "$claude_log" ]]; then
+            log_error "Claude error output:"
+            tail -20 "$claude_log" | while read -r line; do
+                log_error "  $line"
+            done
+        fi
+        
+        return $exit_code
     fi
-    
-    return 0
 }
 
 # サンプル実装の作成（開発用）
@@ -378,9 +414,188 @@ add_issue_comment() {
 
 # クリーンアップ
 cleanup() {
-    if [[ -n "$WORKSPACE_DIR" ]] && [[ -d "$WORKSPACE_DIR" ]]; then
-        log_info "Cleaning up workspace: $WORKSPACE_DIR"
-        rm -rf "$WORKSPACE_DIR"
+    # Terminal モードの場合はワークスペースを保持
+    if [[ "$EXECUTION_MODE" == "terminal" ]]; then
+        if [[ -n "$WORKSPACE_DIR" ]] && [[ -d "$WORKSPACE_DIR" ]]; then
+            log_info "Keeping workspace for terminal session: $WORKSPACE_DIR"
+            # ワークスペース情報をファイルに記録
+            local workspace_info="${CLAUDE_AUTO_HOME}/logs/active_workspaces.json"
+            local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            local workspace_entry=$(cat <<EOF
+{
+    "workspace_path": "$WORKSPACE_DIR",
+    "repository": "$REPOSITORY",
+    "issue_number": $ISSUE_NUMBER,
+    "branch_name": "$BRANCH_NAME",
+    "created_at": "$timestamp",
+    "execution_id": "$EXECUTION_ID"
+}
+EOF
+            )
+            
+            # アクティブワークスペースファイルが存在しない場合は作成
+            if [[ ! -f "$workspace_info" ]]; then
+                echo "[]" > "$workspace_info"
+            fi
+            
+            # 新しいエントリを追加
+            local temp_file="${workspace_info}.tmp"
+            jq ". += [$workspace_entry]" "$workspace_info" > "$temp_file" && mv "$temp_file" "$workspace_info"
+        fi
+    else
+        # 通常のクリーンアップ
+        if [[ -n "$WORKSPACE_DIR" ]] && [[ -d "$WORKSPACE_DIR" ]]; then
+            log_info "Cleaning up workspace: $WORKSPACE_DIR"
+            rm -rf "$WORKSPACE_DIR"
+        fi
+    fi
+}
+
+# 実行モードの決定
+determine_execution_mode() {
+    # 設定から実行モードを取得
+    local default_mode
+    default_mode=$(get_config_value "claude.execution.mode" "batch" "integrations")
+    
+    # Issue bodyから実行モードのヒントを検索
+    local mode_hints=("@claude-terminal" "@claude-interactive" "@claude-visual")
+    
+    for hint in "${mode_hints[@]}"; do
+        if [[ "$ISSUE_BODY" == *"$hint"* ]]; then
+            case "$hint" in
+                "@claude-terminal"|"@claude-interactive"|"@claude-visual")
+                    EXECUTION_MODE="terminal"
+                    log_info "Terminal execution mode detected from keyword: $hint"
+                    return 0
+                    ;;
+            esac
+        fi
+    done
+    
+    # Issue labelsからTerminal実行モードを判定
+    if [[ "$ISSUE_LABELS" == *"terminal-execution"* ]] || [[ "$ISSUE_LABELS" == *"interactive"* ]]; then
+        EXECUTION_MODE="terminal"
+        log_info "Terminal execution mode detected from labels"
+        return 0
+    fi
+    
+    # 複雑なタスクの自動判定
+    if is_complex_task "$ISSUE_BODY"; then
+        EXECUTION_MODE="terminal"
+        log_info "Terminal execution mode auto-selected for complex task"
+        return 0
+    fi
+    
+    # デフォルトモードを使用
+    EXECUTION_MODE="$default_mode"
+    log_info "Using default execution mode: $EXECUTION_MODE"
+}
+
+# 複雑なタスクかどうかを判定
+is_complex_task() {
+    local issue_body=$1
+    
+    # 複雑さの指標
+    local complexity_indicators=(
+        "複数のファイル" "multiple files" "several files"
+        "新しいAPI" "new API" "API endpoint"
+        "データベース" "database" "DB"
+        "テスト" "test" "testing"
+        "リファクタリング" "refactor" "refactoring"
+        "アーキテクチャ" "architecture"
+        "マイグレーション" "migration"
+        "設計" "design"
+    )
+    
+    local indicator_count=0
+    for indicator in "${complexity_indicators[@]}"; do
+        if [[ "$issue_body" == *"$indicator"* ]]; then
+            ((indicator_count++))
+        fi
+    done
+    
+    # 2つ以上の指標があれば複雑なタスクと判定
+    [[ $indicator_count -ge 2 ]]
+}
+
+# Terminal自動起動でClaude実行
+execute_claude_with_terminal() {
+    log_info "Executing Claude with Terminal auto-launch..."
+    
+    # ターミナルランチャーのパス
+    local terminal_launcher="${CLAUDE_AUTO_HOME}/src/core/terminal-launcher.sh"
+    
+    if [[ ! -x "$terminal_launcher" ]]; then
+        log_error "Terminal launcher not found or not executable: $terminal_launcher"
+        return 1
+    fi
+    
+    # 実行タスクの準備
+    local task_description="Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}
+
+${ISSUE_BODY}
+
+## 実行環境
+- Repository: ${REPOSITORY}
+- Branch: ${BRANCH_NAME}
+- Base Branch: ${BASE_BRANCH}
+- Workspace: ${WORKSPACE_DIR}
+
+## 次のステップ
+1. プロジェクト構造を確認
+2. 要求された機能を実装
+3. テストを実行
+4. 変更をコミット
+5. プルリクエストを作成"
+    
+    # 使用するターミナルタイプを設定から取得
+    local terminal_type
+    terminal_type=$(get_config_value "claude.terminal.app" "Terminal" "integrations")
+    
+    # Terminal自動起動（Issue番号も渡す）
+    if "$terminal_launcher" "$WORKSPACE_DIR" "$task_description" "$terminal_type" "$ISSUE_NUMBER"; then
+        log_info "Terminal session launched successfully"
+        
+        # Issueに進行状況をコメント
+        add_issue_comment "$ISSUE_NUMBER" "🚀 Claude Codeが新しい${terminal_type}セッションで起動されました。
+
+**セッション情報:**
+- プロジェクト: \`${WORKSPACE_DIR}\`
+- ブランチ: \`${BRANCH_NAME}\`
+- タスク: ${ISSUE_TITLE}
+
+Claude Codeが自動的にタスクを実行し、完了後にプルリクエストを作成します。
+
+⚠️ **注意**: Terminal セッションが起動されました。これ以上の自動処理は行いません。"
+        
+        # 実行履歴を更新して再処理を防ぐ
+        # 注: この関数はevent-processor.shにあるため、ここでは手動で更新
+        local execution_history_file="${CLAUDE_AUTO_HOME}/execution_history.json"
+        if [[ -f "$execution_history_file" ]]; then
+            # 既存の履歴に追加（Terminal実行は即座に "completed" とマーク）
+            local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            local new_entry=$(cat <<EOF
+{
+    "repo": "$REPOSITORY",
+    "issue_number": $ISSUE_NUMBER,
+    "status": "completed",
+    "created_at": "$timestamp",
+    "updated_at": "$timestamp", 
+    "retry_count": 0,
+    "details": "Terminal session launched - manual intervention required"
+}
+EOF
+            )
+            
+            # 既存のJSONに新しいエントリを追加
+            local temp_file="${execution_history_file}.tmp"
+            jq ". += [$new_entry]" "$execution_history_file" > "$temp_file" && mv "$temp_file" "$execution_history_file"
+        fi
+        
+        return 0
+    else
+        log_error "Failed to launch terminal session"
+        return 1
     fi
 }
 
@@ -413,17 +628,28 @@ main() {
     setup_repository || exit 1
     
     if [[ "$EVENT_TYPE" == "issue" ]]; then
-        # Claudeプロンプトの生成
-        local prompt
-        prompt=$(generate_claude_prompt)
+        # 実行モードの決定
+        determine_execution_mode
         
-        # Claude実行
-        execute_claude "$prompt" || exit 1
-        
-        # 変更のコミット
-        if commit_changes; then
-            # Pull Requestの作成
-            create_pull_request || exit 1
+        if [[ "$EXECUTION_MODE" == "terminal" ]]; then
+            # Terminal自動起動モード（ワークスペースはクリーンアップしない）
+            execute_claude_with_terminal || exit 1
+            # Terminal モードの場合はワークスペースを保持
+            WORKSPACE_DIR=""  # クリーンアップを防ぐ
+        else
+            # バッチモード（従来の方式）
+            # Claudeプロンプトの生成
+            local prompt
+            prompt=$(generate_claude_prompt)
+            
+            # Claude実行
+            execute_claude "$prompt" || exit 1
+            
+            # 変更のコミット
+            if commit_changes; then
+                # Pull Requestの作成
+                create_pull_request || exit 1
+            fi
         fi
     elif [[ "$EVENT_TYPE" == "pull_request" ]]; then
         # PRレビューの実装（将来の拡張）
