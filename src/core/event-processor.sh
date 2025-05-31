@@ -51,13 +51,20 @@ check_execution_history() {
         return 1
     fi
     
+    # ファイルの内容を検証し、破損している場合は復旧
+    if ! jq . "$EXECUTION_HISTORY_FILE" >/dev/null 2>&1; then
+        log_warn "Execution history file is corrupted during check, resetting to empty array"
+        echo "[]" > "$EXECUTION_HISTORY_FILE"
+        return 1
+    fi
+    
     # 実行履歴から該当するエントリを検索
     local history_entry
-    history_entry=$(jq -r ".[] | select(.repo == \"$repo_name\" and .issue_number == $issue_number)" "$EXECUTION_HISTORY_FILE")
+    history_entry=$(jq -r ".[] | select(.repo == \"$repo_name\" and .issue_number == $issue_number)" "$EXECUTION_HISTORY_FILE" 2>/dev/null || echo "")
     
     if [[ -n "$history_entry" ]]; then
         local status
-        status=$(echo "$history_entry" | jq -r '.status')
+        status=$(echo "$history_entry" | jq -r '.status' 2>/dev/null || echo "")
         
         case "$status" in
             "completed")
@@ -70,7 +77,7 @@ check_execution_history() {
                 ;;
             "failed")
                 local retry_count
-                retry_count=$(echo "$history_entry" | jq -r '.retry_count // 0')
+                retry_count=$(echo "$history_entry" | jq -r '.retry_count // 0' 2>/dev/null || echo 0)
                 local max_retries
                 max_retries=$(get_config_value "claude.execution.max_retries" "2" "integrations")
                 
@@ -88,7 +95,7 @@ check_execution_history() {
     return 1
 }
 
-# 実行履歴の更新
+# 実行履歴の更新（ファイルロック付き）
 update_execution_history() {
     local issue_number=$1
     local repo_name=$2
@@ -98,14 +105,46 @@ update_execution_history() {
     local timestamp
     timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     
+    # 実行履歴ファイルのロック
+    local history_lock="${EXECUTION_LOCK_DIR}/execution_history.lock"
+    local lock_timeout=30
+    local elapsed=0
+    
+    while [[ $elapsed -lt $lock_timeout ]]; do
+        if mkdir "$history_lock" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+        ((elapsed++))
+    done
+    
+    if [[ $elapsed -ge $lock_timeout ]]; then
+        log_error "Failed to acquire execution history lock"
+        return 1
+    fi
+    
+    # ファイルが存在しない場合は初期化
+    if [[ ! -f "$EXECUTION_HISTORY_FILE" ]]; then
+        echo "[]" > "$EXECUTION_HISTORY_FILE"
+    fi
+    
+    # ファイルの内容を検証し、破損している場合は復旧
+    if ! jq . "$EXECUTION_HISTORY_FILE" >/dev/null 2>&1; then
+        log_warn "Execution history file is corrupted, resetting to empty array"
+        echo "[]" > "$EXECUTION_HISTORY_FILE"
+    fi
+    
     # 既存のエントリを検索
     local existing_entry
-    existing_entry=$(jq -r ".[] | select(.repo == \"$repo_name\" and .issue_number == $issue_number)" "$EXECUTION_HISTORY_FILE")
+    existing_entry=$(jq -r ".[] | select(.repo == \"$repo_name\" and .issue_number == $issue_number)" "$EXECUTION_HISTORY_FILE" 2>/dev/null || echo "")
+    
+    # トランザクション的な更新
+    local temp_file="${EXECUTION_HISTORY_FILE}.tmp.$$"
     
     if [[ -n "$existing_entry" ]]; then
         # 既存エントリを更新
         local retry_count
-        retry_count=$(echo "$existing_entry" | jq -r '.retry_count // 0')
+        retry_count=$(echo "$existing_entry" | jq -r '.retry_count // 0' 2>/dev/null || echo 0)
         
         if [[ "$status" == "failed" ]]; then
             ((retry_count++))
@@ -116,7 +155,7 @@ update_execution_history() {
             .updated_at = \"$timestamp\" | 
             .retry_count = $retry_count | 
             .details = \"$details\" 
-        else . end)" "$EXECUTION_HISTORY_FILE" > "${EXECUTION_HISTORY_FILE}.tmp"
+        else . end)" "$EXECUTION_HISTORY_FILE" > "$temp_file" 2>/dev/null
     else
         # 新規エントリを追加
         jq ". += [{
@@ -127,10 +166,19 @@ update_execution_history() {
             \"updated_at\": \"$timestamp\",
             \"retry_count\": 0,
             \"details\": \"$details\"
-        }]" "$EXECUTION_HISTORY_FILE" > "${EXECUTION_HISTORY_FILE}.tmp"
+        }]" "$EXECUTION_HISTORY_FILE" > "$temp_file" 2>/dev/null
     fi
     
-    mv "${EXECUTION_HISTORY_FILE}.tmp" "$EXECUTION_HISTORY_FILE"
+    # 更新が成功した場合のみファイルを置換
+    if [[ -f "$temp_file" ]] && jq . "$temp_file" >/dev/null 2>&1; then
+        mv "$temp_file" "$EXECUTION_HISTORY_FILE"
+    else
+        log_error "Failed to update execution history"
+        rm -f "$temp_file"
+    fi
+    
+    # ロックを解放
+    rm -rf "$history_lock"
 }
 
 # ロックの取得
@@ -195,15 +243,40 @@ process_issue_event() {
     issue_labels=$(echo "$issue_data" | jq -r '.labels[].name' | tr '\n' ' ')
     
     local issue_state
-    issue_state=$(echo "$issue_data" | jq -r '.state')
+    issue_state=$(echo "$issue_data" | jq -r '.state // "unknown"')
+    
+    local keyword_type
+    keyword_type=$(echo "$issue_data" | jq -r '.keyword_type // "implementation"')
+    
+    local found_keyword
+    found_keyword=$(echo "$issue_data" | jq -r '.found_keyword // ""')
     
     log_info "Processing Issue #${issue_number}: ${issue_title}"
+    log_info "Issue state: '$issue_state'"
+    log_info "Keyword type: '$keyword_type'"
+    log_info "Found keyword: '$found_keyword'"
+    log_info "Issue data keys: $(echo "$issue_data" | jq -r 'keys | join(", ")')"
     
-    # クローズされたIssueはスキップ
-    if [[ "$issue_state" != "open" ]]; then
-        log_info "Skipping closed issue #${issue_number}"
+    # Issue状態のチェック（OPENまたはopenの場合のみ処理）
+    if [[ "$issue_state" != "open" ]] && [[ "$issue_state" != "OPEN" ]] && [[ "$issue_state" != "unknown" ]]; then
+        log_info "Skipping closed issue #${issue_number} (state: $issue_state)"
         return 0
     fi
+    
+    # stateフィールドがない場合はgh CLIで直接確認
+    if [[ "$issue_state" == "unknown" ]]; then
+        log_info "Issue state unknown, checking with gh CLI..."
+        local gh_state
+        gh_state=$(gh issue view "$issue_number" --repo "$REPO_NAME" --json state | jq -r '.state')
+        log_info "GitHub state from gh CLI: '$gh_state'"
+        
+        if [[ "$gh_state" != "OPEN" ]]; then
+            log_info "Skipping closed issue #${issue_number} (gh state: $gh_state)"
+            return 0
+        fi
+    fi
+    
+    log_info "Proceeding to process OPEN issue #${issue_number}"
     
     # 実行履歴をチェック
     if check_execution_history "$issue_number" "$REPO_NAME"; then
@@ -255,9 +328,47 @@ process_issue_event() {
     
     log_info "Generated branch name: $branch_name"
     
-    # Claude実行パラメータを準備
-    local execution_params
-    execution_params=$(cat <<EOF
+    # キーワードタイプに基づいて処理を分岐
+    if [[ "$keyword_type" == "reply" ]]; then
+        # 返信モード: Claude で返信を生成してコメントを投稿
+        log_info "Handling as reply request for Issue #${issue_number}"
+        
+        local reply_params
+        reply_params=$(cat <<EOF
+{
+    "event_type": "reply",
+    "repository": "$REPO_NAME",
+    "issue_number": $issue_number,
+    "issue_title": $(echo "$issue_title" | jq -Rs .),
+    "issue_body": $(echo "$issue_body" | jq -Rs .),
+    "issue_labels": $(echo "$issue_labels" | jq -Rs .),
+    "found_keyword": $(echo "$found_keyword" | jq -Rs .)
+}
+EOF
+        )
+        
+        local claude_reply="${CLAUDE_AUTO_HOME}/src/core/claude-reply.sh"
+        
+        if [[ -x "$claude_reply" ]]; then
+            log_info "Executing Claude Reply for Issue #${issue_number}"
+            
+            if echo "$reply_params" | "$claude_reply"; then
+                update_execution_history "$issue_number" "$REPO_NAME" "completed" "Reply posted successfully"
+                send_slack_notification "reply_success" "$issue_number" "$issue_title" "$REPO_NAME"
+            else
+                update_execution_history "$issue_number" "$REPO_NAME" "failed" "Claude reply failed"
+                send_slack_notification "reply_error" "$issue_number" "$issue_title" "$REPO_NAME"
+            fi
+        else
+            log_error "Claude reply handler not found or not executable"
+            update_execution_history "$issue_number" "$REPO_NAME" "failed" "Claude reply handler not available"
+        fi
+    elif [[ "$keyword_type" == "terminal" ]]; then
+        # Terminal自動起動モード: Terminal を自動起動してClaude Code実行
+        log_info "Handling as terminal execution request for Issue #${issue_number}"
+        
+        local execution_params
+        execution_params=$(cat <<EOF
 {
     "event_type": "issue",
     "repository": "$REPO_NAME",
@@ -268,27 +379,67 @@ process_issue_event() {
     "branch_name": "$branch_name",
     "branch_strategy": "$branch_strategy",
     "branch_type": "$branch_type",
-    "base_branch": $(echo "$repo_config" | jq -r '.base_branch // "main"' | jq -Rs .)
+    "base_branch": $(echo "$repo_config" | jq -r '.base_branch // "main"' | jq -Rs .),
+    "found_keyword": $(echo "$found_keyword" | jq -Rs .),
+    "execution_mode": "terminal"
 }
 EOF
-    )
-    
-    # Claude実行
-    local claude_executor="${CLAUDE_AUTO_HOME}/src/core/claude-executor.sh"
-    
-    if [[ -x "$claude_executor" ]]; then
-        log_info "Executing Claude for Issue #${issue_number}"
+        )
         
-        if echo "$execution_params" | "$claude_executor"; then
-            update_execution_history "$issue_number" "$REPO_NAME" "completed" "Successfully processed"
-            send_slack_notification "success" "$issue_number" "$issue_title" "$REPO_NAME"
+        local claude_executor="${CLAUDE_AUTO_HOME}/src/core/claude-executor.sh"
+        
+        if [[ -x "$claude_executor" ]]; then
+            log_info "Executing Claude with Terminal auto-launch for Issue #${issue_number}"
+            
+            if echo "$execution_params" | "$claude_executor"; then
+                update_execution_history "$issue_number" "$REPO_NAME" "completed" "Terminal session launched successfully"
+                send_slack_notification "terminal_success" "$issue_number" "$issue_title" "$REPO_NAME"
+            else
+                update_execution_history "$issue_number" "$REPO_NAME" "failed" "Terminal execution failed"
+                send_slack_notification "terminal_error" "$issue_number" "$issue_title" "$REPO_NAME"
+            fi
         else
-            update_execution_history "$issue_number" "$REPO_NAME" "failed" "Claude execution failed"
-            send_slack_notification "error" "$issue_number" "$issue_title" "$REPO_NAME"
+            log_error "Claude executor not found or not executable"
+            update_execution_history "$issue_number" "$REPO_NAME" "failed" "Claude executor not available"
         fi
     else
-        log_error "Claude executor not found or not executable"
-        update_execution_history "$issue_number" "$REPO_NAME" "failed" "Claude executor not available"
+        # 実装モード: 従来通りのClaude実行による実装
+        log_info "Handling as implementation request for Issue #${issue_number}"
+        
+        local execution_params
+        execution_params=$(cat <<EOF
+{
+    "event_type": "issue",
+    "repository": "$REPO_NAME",
+    "issue_number": $issue_number,
+    "issue_title": $(echo "$issue_title" | jq -Rs .),
+    "issue_body": $(echo "$issue_body" | jq -Rs .),
+    "issue_labels": $(echo "$issue_labels" | jq -Rs .),
+    "branch_name": "$branch_name",
+    "branch_strategy": "$branch_strategy",
+    "branch_type": "$branch_type",
+    "base_branch": $(echo "$repo_config" | jq -r '.base_branch // "main"' | jq -Rs .),
+    "found_keyword": $(echo "$found_keyword" | jq -Rs .)
+}
+EOF
+        )
+        
+        local claude_executor="${CLAUDE_AUTO_HOME}/src/core/claude-executor.sh"
+        
+        if [[ -x "$claude_executor" ]]; then
+            log_info "Executing Claude for Issue #${issue_number}"
+            
+            if echo "$execution_params" | "$claude_executor"; then
+                update_execution_history "$issue_number" "$REPO_NAME" "completed" "Successfully processed"
+                send_slack_notification "success" "$issue_number" "$issue_title" "$REPO_NAME"
+            else
+                update_execution_history "$issue_number" "$REPO_NAME" "failed" "Claude execution failed"
+                send_slack_notification "error" "$issue_number" "$issue_title" "$REPO_NAME"
+            fi
+        else
+            log_error "Claude executor not found or not executable"
+            update_execution_history "$issue_number" "$REPO_NAME" "failed" "Claude executor not available"
+        fi
     fi
     
     # ロックを解放

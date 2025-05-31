@@ -61,6 +61,7 @@ parse_execution_params() {
             ISSUE_NUMBER=$(echo "$EXECUTION_PARAMS" | jq -r '.issue_number')
             ISSUE_TITLE=$(echo "$EXECUTION_PARAMS" | jq -r '.issue_title')
             ISSUE_BODY=$(echo "$EXECUTION_PARAMS" | jq -r '.issue_body')
+            ISSUE_LABELS=$(echo "$EXECUTION_PARAMS" | jq -r '.issue_labels // ""')
             BRANCH_NAME=$(echo "$EXECUTION_PARAMS" | jq -r '.branch_name')
             BASE_BRANCH=$(echo "$EXECUTION_PARAMS" | jq -r '.base_branch')
             
@@ -194,13 +195,6 @@ execute_claude() {
     
     # プロンプトファイルの作成
     local prompt_file="${WORKSPACE_DIR}/.claude_prompt"
-    echo "$prompt" > "$prompt_file"
-    
-    # タイムアウト付きでClaude実行
-    local start_time=$(date +%s)
-    
-    # 実際のClaude Code実行
-    log_info "Running Claude Code in workspace: $WORKSPACE_DIR"
     
     # より詳細なプロンプトを作成
     local detailed_prompt
@@ -216,8 +210,17 @@ Please help me implement the solution for this issue. I'm currently in the proje
 
 If you need to see the current project structure, create files, or make modifications, please go ahead and do so. I'm ready to work on this with you."
 
-    # プロンプトを標準入力として渡してClaude Codeを実行
-    if timeout $MAX_EXECUTION_TIME bash -c "cd '$WORKSPACE_DIR' && echo '$detailed_prompt' | claude" > "$claude_log" 2>&1; then
+    # プロンプトをファイルに保存
+    echo "$detailed_prompt" > "$prompt_file"
+    
+    # タイムアウト付きでClaude実行
+    local start_time=$(date +%s)
+    
+    # 実際のClaude Code実行
+    log_info "Running Claude Code in workspace: $WORKSPACE_DIR"
+    
+    # プロンプトファイルを使ってClaude Codeを実行（非対話モード）
+    if timeout $MAX_EXECUTION_TIME bash -c "cd '$WORKSPACE_DIR' && echo \"\$(cat '$prompt_file')\" | claude" > "$claude_log" 2>&1; then
         log_info "Claude Code execution successful"
         
         # 実行時間の記録
@@ -346,36 +349,34 @@ create_pull_request() {
     
     # PR作成用のデータを準備
     local pr_title="[Claude Auto] ${ISSUE_TITLE}"
-    local pr_body
-    pr_body=$(get_prompt_template "pr_prompts.pr_description" "claude-prompts")
-    
-    # PRボディの変数を置換
-    pr_body="${pr_body//\{summary\}/Automated implementation for Issue #${ISSUE_NUMBER}}"
-    pr_body="${pr_body//\{changes\}/See commits for detailed changes}"
-    pr_body="${pr_body//\{issue_number\}/$ISSUE_NUMBER}"
-    pr_body="${pr_body//\{test_description\}/Tests have been added/updated as needed}"
-    
-    # GitHub APIでPRを作成
-    local pr_data
-    pr_data=$(cat <<EOF
-{
-    "title": "$pr_title",
-    "body": "$pr_body",
-    "head": "$BRANCH_NAME",
-    "base": "$BASE_BRANCH",
-    "draft": false
-}
-EOF
-    )
+    local pr_body="## Summary
+
+Automated implementation for Issue #${ISSUE_NUMBER}
+
+## Changes
+
+$(git log --oneline ${BASE_BRANCH}..HEAD | sed 's/^/- /')
+
+## Related Issue
+
+Closes #${ISSUE_NUMBER}
+
+## Test Plan
+
+- [x] Code implemented by Claude Automation System
+- [x] Changes committed and pushed
+- [ ] Manual testing recommended
+
+---
+🤖 This PR was created by [Claude Automation System](https://github.com/anthropics/claude-code)"
     
     log_info "Creating pull request..."
     
-    local pr_response
-    if pr_response=$(github_api_call "/repos/${REPOSITORY}/pulls" "POST" "$pr_data"); then
+    # gh コマンドでPRを作成
+    local pr_url
+    if pr_url=$(gh pr create --repo "$REPOSITORY" --title "$pr_title" --body "$pr_body" --base "$BASE_BRANCH" --head "$BRANCH_NAME"); then
         local pr_number
-        pr_number=$(echo "$pr_response" | jq -r '.number')
-        local pr_url
-        pr_url=$(echo "$pr_response" | jq -r '.html_url')
+        pr_number=$(echo "$pr_url" | grep -o '/pull/[0-9]*' | grep -o '[0-9]*')
         
         log_info "Pull request created: #${pr_number} - ${pr_url}"
         
@@ -383,7 +384,9 @@ EOF
         add_pr_labels "$pr_number"
         
         # Issueにコメントを追加
-        add_issue_comment "$ISSUE_NUMBER" "🤖 Claude has created PR #${pr_number} to address this issue.\n\nPR: ${pr_url}"
+        add_issue_comment "$ISSUE_NUMBER" "🤖 Claude has created PR #${pr_number} to address this issue.
+
+PR: ${pr_url}"
         
         return 0
     else
@@ -396,9 +399,8 @@ EOF
 add_pr_labels() {
     local pr_number=$1
     
-    local labels='["claude-automated-pr"]'
-    
-    github_api_call "/repos/${REPOSITORY}/issues/${pr_number}/labels" "POST" "{\"labels\": $labels}" || true
+    # gh コマンドでラベルを追加
+    gh pr edit "$pr_number" --repo "$REPOSITORY" --add-label "claude-automated-pr" || true
 }
 
 # Issueにコメントを追加
@@ -406,10 +408,8 @@ add_issue_comment() {
     local issue_number=$1
     local comment=$2
     
-    local comment_data
-    comment_data=$(jq -n --arg body "$comment" '{body: $body}')
-    
-    github_api_call "/repos/${REPOSITORY}/issues/${issue_number}/comments" "POST" "$comment_data" || true
+    # gh コマンドでコメントを投稿
+    gh issue comment "$issue_number" --repo "$REPOSITORY" --body "$comment" || true
 }
 
 # クリーンアップ
@@ -574,22 +574,25 @@ Claude Codeが自動的にタスクを実行し、完了後にプルリクエス
         if [[ -f "$execution_history_file" ]]; then
             # 既存の履歴に追加（Terminal実行は即座に "completed" とマーク）
             local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-            local new_entry=$(cat <<EOF
-{
-    "repo": "$REPOSITORY",
-    "issue_number": $ISSUE_NUMBER,
-    "status": "completed",
-    "created_at": "$timestamp",
-    "updated_at": "$timestamp", 
-    "retry_count": 0,
-    "details": "Terminal session launched - manual intervention required"
-}
-EOF
-            )
             
-            # 既存のJSONに新しいエントリを追加
+            # jqを使って安全にJSONエントリを追加
             local temp_file="${execution_history_file}.tmp"
-            jq ". += [$new_entry]" "$execution_history_file" > "$temp_file" && mv "$temp_file" "$execution_history_file"
+            jq --arg repo "$REPOSITORY" \
+               --arg issue_number "$ISSUE_NUMBER" \
+               --arg status "completed" \
+               --arg created_at "$timestamp" \
+               --arg updated_at "$timestamp" \
+               --arg retry_count "0" \
+               --arg details "Terminal session launched - manual intervention required" \
+               '. += [{
+                   repo: $repo,
+                   issue_number: ($issue_number | tonumber),
+                   status: $status,
+                   created_at: $created_at,
+                   updated_at: $updated_at,
+                   retry_count: ($retry_count | tonumber),
+                   details: $details
+               }]' "$execution_history_file" > "$temp_file" && mv "$temp_file" "$execution_history_file"
         fi
         
         return 0

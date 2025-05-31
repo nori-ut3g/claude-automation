@@ -57,7 +57,10 @@ save_state() {
 # 状態の読み込み
 load_state() {
     if [[ -f "$STATE_FILE" ]]; then
-        mapfile -t LAST_CHECK_TIMES < "$STATE_FILE"
+        # Bash 3.x互換の読み込み方法
+        while IFS= read -r line; do
+            LAST_CHECK_TIMES+=("$line")
+        done < "$STATE_FILE"
     fi
 }
 
@@ -79,68 +82,13 @@ check_pid_file() {
     echo $$ > "$PID_FILE"
 }
 
-# GitHub API呼び出し
-github_api_call() {
-    local endpoint=$1
-    local method=${2:-GET}
-    local data=${3:-}
-    
-    local url="${GITHUB_API_BASE}${endpoint}"
-    local github_token
-    github_token=$(get_config_value "github.token" "" "integrations")
-    
-    if [[ -z "$github_token" ]]; then
-        log_error "GitHub token not configured"
+# gh CLI認証チェック
+check_gh_auth() {
+    if ! gh auth status >/dev/null 2>&1; then
+        log_error "gh CLI is not authenticated. Please run 'gh auth login'"
         return 1
     fi
-    
-    local curl_opts=(
-        -s
-        -H "Accept: application/vnd.github.v3+json"
-        -H "Authorization: token ${github_token}"
-        -H "User-Agent: Claude-Automation-System"
-    )
-    
-    if [[ "$method" != "GET" ]]; then
-        curl_opts+=(-X "$method")
-    fi
-    
-    if [[ -n "$data" ]]; then
-        curl_opts+=(-d "$data")
-    fi
-    
-    local response
-    local http_code
-    
-    response=$(curl "${curl_opts[@]}" -w "\n%{http_code}" "$url")
-    http_code=$(echo "$response" | tail -n1)
-    response=$(echo "$response" | sed '$d')
-    
-    # レート制限のチェック
-    if [[ "$http_code" == "403" ]]; then
-        local rate_limit_remaining
-        rate_limit_remaining=$(curl -s -H "Authorization: token ${github_token}" \
-            "${GITHUB_API_BASE}/rate_limit" | jq -r '.rate.remaining')
-        
-        if [[ "$rate_limit_remaining" == "0" ]]; then
-            log_error "GitHub API rate limit exceeded"
-            local reset_time
-            reset_time=$(curl -s -H "Authorization: token ${github_token}" \
-                "${GITHUB_API_BASE}/rate_limit" | jq -r '.rate.reset')
-            local wait_time=$((reset_time - $(date +%s)))
-            log_info "Waiting $wait_time seconds for rate limit reset..."
-            sleep "$wait_time"
-            return 1
-        fi
-    fi
-    
-    if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
-        echo "$response"
-        return 0
-    else
-        log_error "GitHub API call failed (HTTP $http_code): $response"
-        return 1
-    fi
+    return 0
 }
 
 # リポジトリのIssue/PRをチェック
@@ -148,14 +96,42 @@ check_repository_events() {
     local repo_name=$1
     local repo_config=$2
     
-    log_debug "Checking repository: $repo_name"
-    
     # 設定から情報を取得
     local labels
     labels=$(echo "$repo_config" | jq -r '.labels[]?' | tr '\n' ',' | sed 's/,$//')
     
-    local keywords
-    keywords=$(echo "$repo_config" | jq -r '.keywords[]?')
+    # 実装キーワード、返信キーワード、Terminalキーワードを取得
+    local impl_keywords
+    impl_keywords=$(echo "$repo_config" | jq -r '.implementation_keywords[]?' 2>/dev/null || echo "")
+    
+    local reply_keywords  
+    reply_keywords=$(echo "$repo_config" | jq -r '.reply_keywords[]?' 2>/dev/null || echo "")
+    
+    local terminal_keywords
+    terminal_keywords=$(echo "$repo_config" | jq -r '.terminal_keywords[]?' 2>/dev/null || echo "")
+    
+    # 後方互換性のため、古いkeywords設定もチェック
+    local legacy_keywords
+    legacy_keywords=$(echo "$repo_config" | jq -r '.keywords[]?' 2>/dev/null || echo "")
+    
+    # デフォルト設定から取得
+    if [[ -z "$impl_keywords" ]]; then
+        impl_keywords=$(get_config_array "implementation_keywords" "repositories" | jq -r '.[]?')
+    fi
+    
+    if [[ -z "$reply_keywords" ]]; then
+        reply_keywords=$(get_config_array "reply_keywords" "repositories" | jq -r '.[]?')
+    fi
+    
+    if [[ -z "$terminal_keywords" ]]; then
+        terminal_keywords=$(get_config_array "terminal_keywords" "repositories" | jq -r '.[]?')
+    fi
+    
+    log_info "Checking repository: $repo_name"
+    log_info "Looking for labels: $labels"
+    log_info "Looking for implementation keywords: $impl_keywords"
+    log_info "Looking for reply keywords: $reply_keywords"
+    log_info "Looking for terminal keywords: $terminal_keywords"
     
     # 最後のチェック時刻を取得
     local last_check=""
@@ -171,10 +147,10 @@ check_repository_events() {
     current_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     
     # Issue のチェック
-    check_issues "$repo_name" "$labels" "$keywords" "$last_check"
+    check_issues "$repo_name" "$labels" "$impl_keywords" "$reply_keywords" "$terminal_keywords" "$last_check"
     
     # Pull Request のチェック
-    check_pull_requests "$repo_name" "$labels" "$keywords" "$last_check"
+    check_pull_requests "$repo_name" "$labels" "$impl_keywords" "$reply_keywords" "$terminal_keywords" "$last_check"
     
     # 最終チェック時刻を更新
     update_last_check_time "$repo_name" "$current_time"
@@ -184,26 +160,32 @@ check_repository_events() {
 check_issues() {
     local repo_name=$1
     local labels=$2
-    local keywords=$3
-    local since=$4
+    local impl_keywords=$3
+    local reply_keywords=$4
+    local terminal_keywords=$5
+    local since=$6
     
-    local query="/repos/${repo_name}/issues?state=open&sort=updated&direction=desc"
+    # gh CLIのオプションを構築
+    local gh_opts=()
+    gh_opts+=("--repo" "$repo_name")
+    gh_opts+=("--state" "open")
+    gh_opts+=("--json" "number,title,body,labels,updatedAt,state")
     
-    if [[ -n "$labels" ]]; then
-        query="${query}&labels=${labels}"
-    fi
-    
-    if [[ -n "$since" ]]; then
-        query="${query}&since=${since}"
-    fi
+    # ラベル検索は実行せず、すべてのIssueを取得してから後でフィルタリング
+    # gh CLIの--labelオプションはAND検索なので、OR検索が必要な場合は後でフィルタリング
     
     local issues
-    if ! issues=$(github_api_call "$query"); then
+    if ! issues=$(gh issue list "${gh_opts[@]}"); then
+        log_error "Failed to fetch issues for $repo_name"
         return 1
     fi
     
+    local issue_count
+    issue_count=$(echo "$issues" | jq '. | length')
+    log_info "Found $issue_count open issues in $repo_name"
+    
     # Issue を処理
-    echo "$issues" | jq -c '.[] | select(.pull_request == null)' | while read -r issue; do
+    echo "$issues" | jq -c '.[]' | while read -r issue; do
         local issue_number
         issue_number=$(echo "$issue" | jq -r '.number')
         
@@ -214,31 +196,83 @@ check_issues() {
         issue_body=$(echo "$issue" | jq -r '.body // ""')
         
         local issue_labels
-        issue_labels=$(echo "$issue" | jq -r '.labels[].name' | tr '\n' ',')
+        issue_labels=$(echo "$issue" | jq -r '.labels[]?.name // ""' | tr '\n' ',')
+        
+        log_info "Processing issue #${issue_number}: $issue_title"
+        log_info "Issue labels: $issue_labels"
+        log_info "Issue body preview: ${issue_body:0:50}..."
         
         # キーワードチェック
         local should_process=false
+        local keyword_type=""
+        local found_keyword=""
         
-        # ラベルが一致する場合
+        # ラベルが一致する場合（OR検索）
         if [[ -n "$labels" ]]; then
-            should_process=true
-        fi
-        
-        # キーワードが含まれる場合
-        if [[ -n "$keywords" ]]; then
-            while IFS= read -r keyword; do
-                if [[ "$issue_body" == *"$keyword"* ]] || [[ "$issue_title" == *"$keyword"* ]]; then
+            IFS=',' read -ra label_array <<< "$labels"
+            for target_label in "${label_array[@]}"; do
+                target_label=$(echo "$target_label" | xargs)  # trim whitespace
+                if [[ "$issue_labels" == *"$target_label"* ]]; then
                     should_process=true
                     break
                 fi
-            done <<< "$keywords"
+            done
         fi
         
-        if [[ "$should_process" == "true" ]]; then
-            log_info "Found matching issue: #${issue_number} - ${issue_title}"
+        # 実装キーワードをチェック
+        if [[ "$should_process" == "true" ]] && [[ -n "$impl_keywords" ]]; then
+            while IFS= read -r keyword; do
+                keyword=$(echo "$keyword" | xargs)  # trim whitespace
+                if [[ -n "$keyword" ]] && ([[ "$issue_body" == *"$keyword"* ]] || [[ "$issue_title" == *"$keyword"* ]]); then
+                    log_info "Found implementation keyword '$keyword' in issue #${issue_number}"
+                    keyword_type="implementation"
+                    found_keyword="$keyword"
+                    break
+                fi
+            done <<< "$impl_keywords"
+        fi
+        
+        # 返信キーワードをチェック (実装キーワードが見つからなかった場合)
+        if [[ "$should_process" == "true" ]] && [[ -z "$keyword_type" ]] && [[ -n "$reply_keywords" ]]; then
+            while IFS= read -r keyword; do
+                keyword=$(echo "$keyword" | xargs)  # trim whitespace
+                if [[ -n "$keyword" ]] && ([[ "$issue_body" == *"$keyword"* ]] || [[ "$issue_title" == *"$keyword"* ]]); then
+                    log_info "Found reply keyword '$keyword' in issue #${issue_number}"
+                    keyword_type="reply"
+                    found_keyword="$keyword"
+                    break
+                fi
+            done <<< "$reply_keywords"
+        fi
+        
+        # Terminalキーワードをチェック (他のキーワードが見つからなかった場合)
+        if [[ "$should_process" == "true" ]] && [[ -z "$keyword_type" ]] && [[ -n "$terminal_keywords" ]]; then
+            while IFS= read -r keyword; do
+                keyword=$(echo "$keyword" | xargs)  # trim whitespace
+                if [[ -n "$keyword" ]] && ([[ "$issue_body" == *"$keyword"* ]] || [[ "$issue_title" == *"$keyword"* ]]); then
+                    log_info "Found terminal keyword '$keyword' in issue #${issue_number}"
+                    keyword_type="terminal"
+                    found_keyword="$keyword"
+                    break
+                fi
+            done <<< "$terminal_keywords"
+        fi
+        
+        # ラベルのみでキーワードがない場合は、デフォルトで実装として扱う
+        if [[ "$should_process" == "true" ]] && [[ -z "$keyword_type" ]]; then
+            keyword_type="implementation"
+            log_info "No keywords found, treating as implementation request"
+        fi
+        
+        if [[ "$should_process" == "true" ]] && [[ -n "$keyword_type" ]]; then
+            log_info "Found matching issue: #${issue_number} - ${issue_title} (type: $keyword_type)"
+            
+            # キーワードタイプを Issue データに追加
+            local enhanced_issue
+            enhanced_issue=$(echo "$issue" | jq --arg kt "$keyword_type" --arg fk "$found_keyword" '. + {keyword_type: $kt, found_keyword: $fk}')
             
             # イベントプロセッサーに渡す
-            process_event "issue" "$repo_name" "$issue"
+            process_event "issue" "$repo_name" "$enhanced_issue"
         fi
     done
 }
@@ -247,13 +281,19 @@ check_issues() {
 check_pull_requests() {
     local repo_name=$1
     local labels=$2
-    local keywords=$3
-    local since=$4
+    local impl_keywords=$3
+    local reply_keywords=$4
+    local terminal_keywords=$5
+    local since=$6
     
-    local query="/repos/${repo_name}/pulls?state=open&sort=updated&direction=desc"
+    # gh CLIのオプションを構築
+    local gh_opts=()
+    gh_opts+=("--repo" "$repo_name")
+    gh_opts+=("--state" "open")
+    gh_opts+=("--json" "number,title,body,labels,updatedAt,state")
     
     local pulls
-    if ! pulls=$(github_api_call "$query"); then
+    if ! pulls=$(gh pr list "${gh_opts[@]}"); then
         return 1
     fi
     
@@ -269,21 +309,15 @@ check_pull_requests() {
         pr_body=$(echo "$pr" | jq -r '.body // ""')
         
         local updated_at
-        updated_at=$(echo "$pr" | jq -r '.updated_at')
+        updated_at=$(echo "$pr" | jq -r '.updatedAt')
         
         # 最終チェック時刻より新しいか確認
         if [[ -n "$since" ]] && [[ "$updated_at" < "$since" ]]; then
             continue
         fi
         
-        # PR の詳細情報を取得（ラベルなど）
-        local pr_detail
-        if ! pr_detail=$(github_api_call "/repos/${repo_name}/pulls/${pr_number}"); then
-            continue
-        fi
-        
         local pr_labels
-        pr_labels=$(echo "$pr_detail" | jq -r '.labels[].name' | tr '\n' ',')
+        pr_labels=$(echo "$pr" | jq -r '.labels[]?.name // ""' | tr '\n' ',')
         
         # キーワードチェック
         local should_process=false
@@ -307,7 +341,7 @@ check_pull_requests() {
             log_info "Found matching PR: #${pr_number} - ${pr_title}"
             
             # イベントプロセッサーに渡す
-            process_event "pull_request" "$repo_name" "$pr_detail"
+            process_event "pull_request" "$repo_name" "$pr"
         fi
     done
 }
@@ -356,31 +390,14 @@ update_last_check_time() {
 # Organization のリポジトリを取得
 get_organization_repos() {
     local org_name=$1
-    local page=1
-    local repos=()
     
-    while true; do
-        local response
-        if ! response=$(github_api_call "/orgs/${org_name}/repos?type=all&page=${page}&per_page=100"); then
-            break
-        fi
-        
-        local repo_count
-        repo_count=$(echo "$response" | jq '. | length')
-        
-        if [[ "$repo_count" -eq 0 ]]; then
-            break
-        fi
-        
-        # リポジトリ名を抽出
-        while IFS= read -r repo; do
-            repos+=("$repo")
-        done < <(echo "$response" | jq -r '.[].full_name')
-        
-        ((page++))
-    done
-    
-    printf '%s\n' "${repos[@]}"
+    # gh CLIでOrganizationのリポジトリを取得
+    if gh repo list "$org_name" --limit 1000 --json nameWithOwner | jq -r '.[].nameWithOwner'; then
+        return 0
+    else
+        log_error "Failed to get repositories for organization: $org_name"
+        return 1
+    fi
 }
 
 # メイン監視ループ
@@ -500,8 +517,8 @@ main() {
     # PIDファイルのチェック
     check_pid_file
     
-    # GitHub認証の設定
-    setup_github_auth || exit 1
+    # gh CLI認証のチェック
+    check_gh_auth || exit 1
     
     # 状態の読み込み
     load_state
