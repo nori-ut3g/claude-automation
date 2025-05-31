@@ -1,0 +1,198 @@
+# Claude Automation System - リポジトリ設定例
+# このファイルをコピーして repositories.yaml として使用してください
+# cp repositories.example.yaml repositories.yaml
+
+# デフォルト設定
+default_settings:
+  check_interval: 60              # 監視間隔（秒）
+  max_concurrent: 3               # 最大同時実行数
+  branch_strategy: "github-flow"  # デフォルトのブランチ戦略
+  base_branch: "main"            # デフォルトのベースブランチ
+  develop_branch: "develop"      # Git-flow用の開発ブランチ
+  
+  # デフォルトのラベルとキーワード
+  default_labels:
+    - "claude-auto"
+  
+  # 実装を開始するキーワード
+  implementation_keywords:
+    - "@claude-implement"
+    - "@claude-create" 
+    - "@claude-fix"
+    - "@claude-build"
+  
+  # 返信のみを行うキーワード（クローン不要）
+  reply_keywords:
+    - "@claude-execute"
+    - "@claude-reply"
+    - "@claude-explain"
+    - "@claude-help"
+    - "@claude-discuss"
+    - "@claude-analysis"
+  
+  # Terminal自動起動キーワード
+  terminal_keywords:
+    - "@claude-terminal"
+    - "@claude-interactive"
+    - "@claude-visual"
+
+# 監視対象リポジトリ
+repositories:
+  # 個人プロジェクト例
+  - name: "your-username/personal-project"
+    enabled: true
+    labels: 
+      - "claude-auto"
+      - "enhancement"
+    implementation_keywords:
+      - "@claude-implement"
+      - "@claude-create"
+      - "@claude-fix"
+    reply_keywords:
+      - "@claude-explain"
+      - "@claude-discuss"
+      - "@claude-help"
+    terminal_keywords:
+      - "@claude-terminal"
+      - "@claude-interactive"
+    branch_strategy: "github-flow"
+    base_branch: "main"
+    slack_channel: "#personal-dev"
+    auto_merge: false
+    require_review: true
+    reviewers: 
+      - "@your-username"
+
+  # チームプロジェクト例
+  - name: "team-org/web-application"
+    enabled: true
+    labels:
+      - "claude-auto"
+      - "bug"
+      - "feature"
+    implementation_keywords:
+      - "@claude-implement"
+      - "@claude-fix"
+      - "@claude-build"
+    reply_keywords:
+      - "@claude-explain"
+      - "@claude-analysis"
+      - "@claude-discuss"
+    terminal_keywords:
+      - "@claude-terminal"
+    branch_strategy: "gitflow"
+    base_branch: "develop"
+    develop_branch: "develop"
+    slack_channel: "#dev-team"
+    jira_project: "WEB"
+    auto_merge: false
+    require_review: true
+    reviewers:
+      - "@dev-team"
+
+  # オープンソースプロジェクト例
+  - name: "opensource-org/library"
+    enabled: true
+    labels:
+      - "claude-auto"
+      - "good-first-issue"
+    implementation_keywords:
+      - "@claude-implement"
+      - "@claude-create"
+    reply_keywords:
+      - "@claude-explain"
+      - "@claude-help"
+    branch_strategy: "github-flow"
+    base_branch: "main"
+    slack_channel: "#opensource"
+    auto_merge: false
+    require_review: true
+
+  # 実験プロジェクト例
+  - name: "your-username/experimental-project"
+    enabled: true
+    labels:
+      - "claude-auto"
+      - "experiment"
+    implementation_keywords:
+      - "@claude-implement"
+      - "@claude-experiment"
+    reply_keywords:
+      - "@claude-explain"
+      - "@claude-discuss"
+    terminal_keywords:
+      - "@claude-terminal"
+      - "@claude-interactive"
+    branch_strategy: "github-flow"
+    base_branch: "main"
+    auto_merge: true      # 実験的にauto merge有効
+    require_review: false
+
+# Organization全体の監視（オプション）
+organizations:
+  # 会社のOrganization例
+  - name: "your-company"
+    enabled: false  # 無効化（必要に応じて有効化）
+    exclude_repos:
+      - "legacy-*"
+      - "archive-*"
+      - "test-*"
+    default_labels:
+      - "claude-auto"
+    slack_channel: "#company-automation"
+    jira_project: "COMP"
+
+  # オープンソースOrganization例
+  - name: "your-opensource-org"
+    enabled: false  # 無効化（必要に応じて有効化）
+    exclude_repos:
+      - "docs-*"
+      - "website"
+    default_labels:
+      - "claude-auto"
+      - "help-wanted"
+    slack_channel: "#opensource-auto"
+
+# ブランチ戦略の詳細設定
+branch_strategies:
+  gitflow:
+    feature_prefix: "feature/"
+    bugfix_prefix: "bugfix/"
+    hotfix_prefix: "hotfix/"
+    release_prefix: "release/"
+    naming_pattern: "{prefix}claude-auto-issue-{number}"
+  
+  github_flow:
+    feature_prefix: "feature/"
+    naming_pattern: "{prefix}claude-auto-issue-{number}"
+
+# ラベルとブランチタイプのマッピング
+label_to_branch_type:
+  - labels: ["hotfix", "critical", "urgent"]
+    branch_type: "hotfix"
+  - labels: ["bug", "fix", "bugfix"]
+    branch_type: "bugfix"
+  - labels: ["feature", "enhancement", "new"]
+    branch_type: "feature"
+  - labels: ["release"]
+    branch_type: "release"
+
+# イベント設定
+event_settings:
+  # 監視するIssueイベント
+  issue_events:
+    - "opened"
+    - "labeled"
+    - "edited"
+  
+  # 監視するPRイベント
+  pr_events:
+    - "opened"
+    - "synchronize"
+    - "labeled"
+  
+  # コメントトリガー
+  comment_triggers:
+    - "@claude-execute"
+    - "@claude-retry"
+    - "@claude-cancel"

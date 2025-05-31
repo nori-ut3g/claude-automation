@@ -1,0 +1,63 @@
+# Git
+.git/
+.gitignore
+
+# Logs
+logs/*.log
+*.log
+
+# Workspace
+workspace/
+temp/
+tmp/
+
+# Environment files
+.env.local
+.env.production
+.env.backup
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Node modules (if any)
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Test files
+test/
+tests/
+spec/
+
+# Documentation build
+docs/_build/
+
+# Coverage reports
+coverage/
+*.cover
+*.coverage
+
+# Lock files
+*.lock
+
+# Runtime files
+*.pid

@@ -461,12 +461,31 @@ MIT License
 Issues、Pull Requestsは歓迎します。
 大きな変更を行う場合は、まずIssueで議論してください。
 
+## デプロイ
+
+### 🚀 クイックスタート
+
+#### Raspberry Pi デプロイ
+```bash
+# 自動デプロイスクリプトで簡単セットアップ
+./scripts/deploy-to-raspberry-pi.sh 192.168.1.100
+```
+
+#### Docker デプロイ
+```bash
+# Docker Composeで即座に起動
+./scripts/deploy-docker.sh --monitoring
+```
+
+詳細は [デプロイガイド](docs/DEPLOYMENT.md) を参照してください。
+
 ## ドキュメント
 
-- [コメントメンション機能ガイド](docs/COMMENT-MENTIONS.md)
-- [操作ガイド](docs/OPERATIONS.md)
-- [設定リファレンス](config/)
-- [CHANGELOG](CHANGELOG.md)
+- [📚 デプロイガイド](docs/DEPLOYMENT.md) - Raspberry Pi/Docker詳細デプロイ手順
+- [💬 コメントメンション機能](docs/COMMENT-MENTIONS.md) - Issue内コメントでのClaude呼び出し
+- [⚙️ 操作ガイド](docs/OPERATIONS.md) - システム運用と管理
+- [🔧 設定リファレンス](config/) - 設定ファイルの詳細
+- [📋 CHANGELOG](CHANGELOG.md) - バージョン履歴
 
 ## サポート
 
