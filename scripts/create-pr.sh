@@ -148,13 +148,11 @@ get_issue_info() {
     
     log_info "Fetching issue #${ISSUE_NUMBER} information..."
     
-    # GitHubトークンの設定
-    setup_github_auth || exit 1
-    
-    local issue_response
-    if issue_response=$(github_api_call "/repos/${REPOSITORY}/issues/${ISSUE_NUMBER}" "GET"); then
-        ISSUE_TITLE=$(echo "$issue_response" | jq -r '.title')
-        ISSUE_BODY=$(echo "$issue_response" | jq -r '.body // ""')
+    # gh コマンドでIssue情報を取得
+    local issue_info
+    if issue_info=$(gh issue view "$ISSUE_NUMBER" --repo "$REPOSITORY" --json title,body); then
+        ISSUE_TITLE=$(echo "$issue_info" | jq -r '.title')
+        ISSUE_BODY=$(echo "$issue_info" | jq -r '.body // ""')
         log_info "Issue title: $ISSUE_TITLE"
     else
         log_error "Failed to fetch issue #${ISSUE_NUMBER}"
@@ -226,24 +224,11 @@ push_branch() {
 create_pull_request() {
     log_info "Creating pull request..."
     
-    local pr_data
-    pr_data=$(cat <<EOF
-{
-    "title": $(echo "$PR_TITLE" | jq -Rs .),
-    "body": $(echo "$PR_BODY" | jq -Rs .),
-    "head": "$CURRENT_BRANCH",
-    "base": "$BASE_BRANCH",
-    "draft": false
-}
-EOF
-    )
-    
-    local pr_response
-    if pr_response=$(github_api_call "/repos/${REPOSITORY}/pulls" "POST" "$pr_data"); then
+    # gh コマンドでPRを作成
+    local pr_url
+    if pr_url=$(gh pr create --repo "$REPOSITORY" --title "$PR_TITLE" --body "$PR_BODY" --base "$BASE_BRANCH" --head "$CURRENT_BRANCH"); then
         local pr_number
-        pr_number=$(echo "$pr_response" | jq -r '.number')
-        local pr_url
-        pr_url=$(echo "$pr_response" | jq -r '.html_url')
+        pr_number=$(echo "$pr_url" | grep -o '/pull/[0-9]*' | grep -o '[0-9]*')
         
         log_info "Pull request created successfully!"
         log_info "PR #${pr_number}: ${pr_url}"
@@ -271,13 +256,12 @@ EOF
 add_pr_labels() {
     local pr_number=$1
     
-    local labels='["claude-automated-pr"]'
+    # gh コマンドでラベルを追加
+    gh pr edit "$pr_number" --repo "$REPOSITORY" --add-label "claude-automated-pr" || true
     
     if [[ -n "$ISSUE_NUMBER" ]]; then
-        labels='["claude-automated-pr", "enhancement"]'
+        gh pr edit "$pr_number" --repo "$REPOSITORY" --add-label "enhancement" || true
     fi
-    
-    github_api_call "/repos/${REPOSITORY}/issues/${pr_number}/labels" "POST" "{\"labels\": $labels}" || true
 }
 
 # Issue にコメントを追加
@@ -285,10 +269,8 @@ add_issue_comment() {
     local issue_number=$1
     local comment=$2
     
-    local comment_data
-    comment_data=$(jq -n --arg body "$comment" '{body: $body}')
-    
-    github_api_call "/repos/${REPOSITORY}/issues/${issue_number}/comments" "POST" "$comment_data" || true
+    # gh コマンドでコメントを投稿
+    gh issue comment "$issue_number" --repo "$REPOSITORY" --body "$comment" || true
 }
 
 # メイン処理
