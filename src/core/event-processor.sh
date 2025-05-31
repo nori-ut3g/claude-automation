@@ -32,6 +32,8 @@ initialize() {
         exit 1
     fi
     
+    # 依存関係のチェック（bcは不要になったため削除）
+    
     # イベントデータを標準入力から読み込み
     EVENT_DATA=$(cat)
     
@@ -95,7 +97,7 @@ check_execution_history() {
     return 1
 }
 
-# 実行履歴の更新（ファイルロック付き）
+# 実行履歴の更新（改良されたファイルロック付き）
 update_execution_history() {
     local issue_number=$1
     local repo_name=$2
@@ -105,21 +107,72 @@ update_execution_history() {
     local timestamp
     timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     
-    # 実行履歴ファイルのロック
+    # 実行履歴ファイルのロック（改良版）
     local history_lock="${EXECUTION_LOCK_DIR}/execution_history.lock"
-    local lock_timeout=30
+    local lock_timeout=60  # タイムアウトを60秒に延長
+    local retry_interval=1  # リトライ間隔（整数）
     local elapsed=0
+    local my_pid=$$
+    local lock_acquired=false
     
+    # ロック取得のリトライループ
     while [[ $elapsed -lt $lock_timeout ]]; do
+        # アトミックなロック取得の試行
         if mkdir "$history_lock" 2>/dev/null; then
+            # ロックディレクトリにPIDとタイムスタンプを記録
+            echo "$my_pid" > "${history_lock}/pid"
+            echo "$(date +%s)" > "${history_lock}/timestamp"
+            echo "$repo_name:$issue_number" > "${history_lock}/resource"
+            lock_acquired=true
+            log_debug "Acquired execution history lock (PID: $my_pid)"
             break
         fi
-        sleep 1
-        ((elapsed++))
+        
+        # 既存のロックが古い場合は削除を試行
+        if [[ -d "$history_lock" ]]; then
+            local lock_pid=""
+            local lock_time=""
+            
+            # ロック情報を安全に読み取り
+            if [[ -f "${history_lock}/pid" ]]; then
+                lock_pid=$(cat "${history_lock}/pid" 2>/dev/null || echo "")
+            fi
+            if [[ -f "${history_lock}/timestamp" ]]; then
+                lock_time=$(cat "${history_lock}/timestamp" 2>/dev/null || echo "")
+            fi
+            
+            local current_time
+            current_time=$(date +%s)
+            local should_remove=false
+            
+            # プロセスが存在しない場合
+            if [[ -n "$lock_pid" ]] && ! ps -p "$lock_pid" > /dev/null 2>&1; then
+                log_warn "Removing stale lock: process $lock_pid no longer exists"
+                should_remove=true
+            # ロックが古すぎる場合（5分以上）
+            elif [[ -n "$lock_time" ]] && [[ $((current_time - lock_time)) -gt 300 ]]; then
+                log_warn "Removing expired lock: locked for more than 5 minutes"
+                should_remove=true
+            fi
+            
+            # 古いロックの削除を試行
+            if [[ "$should_remove" == "true" ]]; then
+                # アトミックに削除を試行（他のプロセスが先に削除する可能性があるため）
+                if rmdir "$history_lock" 2>/dev/null; then
+                    log_info "Successfully removed stale lock"
+                    continue  # すぐに次の取得を試行
+                else
+                    log_debug "Lock was already removed by another process"
+                fi
+            fi
+        fi
+        
+        sleep $retry_interval
+        elapsed=$((elapsed + 1))  # 简化为整数运算
     done
     
-    if [[ $elapsed -ge $lock_timeout ]]; then
-        log_error "Failed to acquire execution history lock"
+    if [[ "$lock_acquired" != "true" ]]; then
+        log_error "Failed to acquire execution history lock after ${lock_timeout}s timeout"
         return 1
     fi
     
@@ -138,91 +191,293 @@ update_execution_history() {
     local existing_entry
     existing_entry=$(jq -r ".[] | select(.repo == \"$repo_name\" and .issue_number == $issue_number)" "$EXECUTION_HISTORY_FILE" 2>/dev/null || echo "")
     
-    # トランザクション的な更新
-    local temp_file="${EXECUTION_HISTORY_FILE}.tmp.$$"
+    # 改良されたトランザクション的な更新
+    local temp_file="${EXECUTION_HISTORY_FILE}.tmp.${my_pid}.$(date +%s%N)"
+    local update_success=false
     
-    if [[ -n "$existing_entry" ]]; then
-        # 既存エントリを更新
-        local retry_count
-        retry_count=$(echo "$existing_entry" | jq -r '.retry_count // 0' 2>/dev/null || echo 0)
-        
-        if [[ "$status" == "failed" ]]; then
-            ((retry_count++))
+    # 最大3回の更新試行
+    for attempt in {1..3}; do
+        if [[ -n "$existing_entry" ]]; then
+            # 既存エントリを更新
+            local retry_count
+            retry_count=$(echo "$existing_entry" | jq -r '.retry_count // 0' 2>/dev/null || echo 0)
+            
+            if [[ "$status" == "failed" ]]; then
+                ((retry_count++))
+            fi
+            
+            if jq "map(if .repo == \"$repo_name\" and .issue_number == $issue_number then 
+                .status = \"$status\" | 
+                .updated_at = \"$timestamp\" | 
+                .retry_count = $retry_count | 
+                .details = \"$details\" 
+            else . end)" "$EXECUTION_HISTORY_FILE" > "$temp_file" 2>/dev/null; then
+                update_success=true
+                break
+            fi
+        else
+            # 新規エントリを追加
+            if jq ". += [{
+                \"repo\": \"$repo_name\",
+                \"issue_number\": $issue_number,
+                \"status\": \"$status\",
+                \"created_at\": \"$timestamp\",
+                \"updated_at\": \"$timestamp\",
+                \"retry_count\": 0,
+                \"details\": \"$details\"
+            }]" "$EXECUTION_HISTORY_FILE" > "$temp_file" 2>/dev/null; then
+                update_success=true
+                break
+            fi
         fi
         
-        jq "map(if .repo == \"$repo_name\" and .issue_number == $issue_number then 
-            .status = \"$status\" | 
-            .updated_at = \"$timestamp\" | 
-            .retry_count = $retry_count | 
-            .details = \"$details\" 
-        else . end)" "$EXECUTION_HISTORY_FILE" > "$temp_file" 2>/dev/null
-    else
-        # 新規エントリを追加
-        jq ". += [{
-            \"repo\": \"$repo_name\",
-            \"issue_number\": $issue_number,
-            \"status\": \"$status\",
-            \"created_at\": \"$timestamp\",
-            \"updated_at\": \"$timestamp\",
-            \"retry_count\": 0,
-            \"details\": \"$details\"
-        }]" "$EXECUTION_HISTORY_FILE" > "$temp_file" 2>/dev/null
-    fi
+        log_warn "Update attempt $attempt failed, retrying..."
+        sleep 0.1
+    done
     
     # 更新が成功した場合のみファイルを置換
-    if [[ -f "$temp_file" ]] && jq . "$temp_file" >/dev/null 2>&1; then
-        mv "$temp_file" "$EXECUTION_HISTORY_FILE"
+    if [[ "$update_success" == "true" ]] && [[ -f "$temp_file" ]] && jq . "$temp_file" >/dev/null 2>&1; then
+        # アトミックな置換
+        if mv "$temp_file" "$EXECUTION_HISTORY_FILE" 2>/dev/null; then
+            log_debug "Execution history updated successfully"
+        else
+            log_error "Failed to atomically update execution history file"
+            rm -f "$temp_file"
+        fi
     else
-        log_error "Failed to update execution history"
+        log_error "Failed to update execution history after 3 attempts"
         rm -f "$temp_file"
     fi
     
     # ロックを解放
-    rm -rf "$history_lock"
+    rm -rf "$history_lock" 2>/dev/null || log_warn "Failed to remove execution history lock"
 }
 
-# ロックの取得
+# 改良されたロック取得機能
 acquire_lock() {
     local lock_name=$1
     local lock_file="${EXECUTION_LOCK_DIR}/${lock_name}.lock"
-    local timeout=300  # 5分のタイムアウト
+    local timeout=600  # 10分のタイムアウト（長時間実行に対応）
+    local retry_interval=1
     local elapsed=0
+    local my_pid=$$
+    
+    log_debug "Attempting to acquire lock: $lock_name (PID: $my_pid)"
     
     while [[ $elapsed -lt $timeout ]]; do
+        # アトミックなロック取得の試行
         if mkdir "$lock_file" 2>/dev/null; then
-            echo $$ > "${lock_file}/pid"
-            log_debug "Acquired lock: $lock_name"
+            # ロック情報を記録
+            echo "$my_pid" > "${lock_file}/pid"
+            echo "$(date +%s)" > "${lock_file}/timestamp"
+            echo "$(hostname)" > "${lock_file}/host"
+            echo "$lock_name" > "${lock_file}/resource"
+            
+            log_debug "Successfully acquired lock: $lock_name (PID: $my_pid)"
             return 0
         fi
         
-        # 既存のロックが古い場合は削除
-        if [[ -f "${lock_file}/pid" ]]; then
-            local lock_pid
-            lock_pid=$(cat "${lock_file}/pid")
-            if ! ps -p "$lock_pid" > /dev/null 2>&1; then
-                log_warn "Removing stale lock: $lock_name"
-                rm -rf "$lock_file"
-                continue
+        # 既存のロックの状態をチェック
+        if [[ -d "$lock_file" ]]; then
+            local lock_pid=""
+            local lock_time=""
+            local lock_host=""
+            
+            # ロック情報を安全に読み取り
+            if [[ -f "${lock_file}/pid" ]]; then
+                lock_pid=$(cat "${lock_file}/pid" 2>/dev/null || echo "")
+            fi
+            if [[ -f "${lock_file}/timestamp" ]]; then
+                lock_time=$(cat "${lock_file}/timestamp" 2>/dev/null || echo "")
+            fi
+            if [[ -f "${lock_file}/host" ]]; then
+                lock_host=$(cat "${lock_file}/host" 2>/dev/null || echo "")
+            fi
+            
+            local current_time
+            current_time=$(date +%s)
+            local should_remove=false
+            local reason=""
+            
+            # プロセスが存在しない場合（同一ホスト上でのみチェック）
+            if [[ -n "$lock_pid" ]] && [[ "$lock_host" == "$(hostname)" ]]; then
+                if ! ps -p "$lock_pid" > /dev/null 2>&1; then
+                    should_remove=true
+                    reason="process $lock_pid no longer exists"
+                fi
+            # ロックが古すぎる場合（15分以上）
+            elif [[ -n "$lock_time" ]] && [[ $((current_time - lock_time)) -gt 900 ]]; then
+                should_remove=true
+                reason="lock expired (older than 15 minutes)"
+            # ロック情報が不完全な場合
+            elif [[ -z "$lock_pid" ]] || [[ -z "$lock_time" ]]; then
+                should_remove=true
+                reason="incomplete lock information"
+            fi
+            
+            # 古いロックの削除を試行
+            if [[ "$should_remove" == "true" ]]; then
+                log_warn "Attempting to remove stale lock '$lock_name': $reason"
+                
+                # アトミックに削除を試行
+                if rm -rf "$lock_file" 2>/dev/null; then
+                    log_info "Successfully removed stale lock: $lock_name"
+                    continue  # すぐに次の取得を試行
+                else
+                    log_debug "Lock was already handled by another process"
+                fi
+            else
+                # ロックが有効な場合は詳細をログ出力
+                if [[ $((elapsed % 30)) -eq 0 ]]; then  # 30秒ごとにログ出力
+                    log_info "Waiting for lock '$lock_name' (held by PID: $lock_pid on $lock_host, age: $((current_time - lock_time))s)"
+                fi
             fi
         fi
         
-        sleep 5
-        ((elapsed += 5))
+        sleep $retry_interval
+        ((elapsed += retry_interval))
     done
     
-    log_error "Failed to acquire lock: $lock_name (timeout)"
+    log_error "Failed to acquire lock '$lock_name' after ${timeout}s timeout"
     return 1
 }
 
-# ロックの解放
+# 改良されたロック解放機能
 release_lock() {
     local lock_name=$1
     local lock_file="${EXECUTION_LOCK_DIR}/${lock_name}.lock"
+    local my_pid=$$
     
     if [[ -d "$lock_file" ]]; then
-        rm -rf "$lock_file"
-        log_debug "Released lock: $lock_name"
+        # ロックの所有権を確認
+        local lock_pid=""
+        if [[ -f "${lock_file}/pid" ]]; then
+            lock_pid=$(cat "${lock_file}/pid" 2>/dev/null || echo "")
+        fi
+        
+        # 自分が所有者でない場合は警告
+        if [[ -n "$lock_pid" ]] && [[ "$lock_pid" != "$my_pid" ]]; then
+            log_warn "Attempting to release lock '$lock_name' owned by different process (PID: $lock_pid, current: $my_pid)"
+        fi
+        
+        # ロックを削除
+        if rm -rf "$lock_file" 2>/dev/null; then
+            log_debug "Successfully released lock: $lock_name (PID: $my_pid)"
+        else
+            log_warn "Failed to remove lock directory: $lock_name"
+        fi
+    else
+        log_debug "Lock already released or never acquired: $lock_name"
     fi
+}
+
+# ロック管理のクリーンアップ機能
+cleanup_stale_locks() {
+    local max_age=${1:-900}  # デフォルト15分
+    local current_time
+    current_time=$(date +%s)
+    local cleaned_count=0
+    
+    log_info "Cleaning up stale locks older than ${max_age} seconds"
+    
+    if [[ ! -d "$EXECUTION_LOCK_DIR" ]]; then
+        return 0
+    fi
+    
+    # ロックディレクトリ内の全ロックをチェック
+    find "$EXECUTION_LOCK_DIR" -name "*.lock" -type d 2>/dev/null | while IFS= read -r lock_file; do
+        local lock_name
+        lock_name=$(basename "$lock_file" .lock)
+        local should_remove=false
+        local reason=""
+        
+        # ロック情報を読み取り
+        local lock_pid=""
+        local lock_time=""
+        local lock_host=""
+        
+        if [[ -f "${lock_file}/pid" ]]; then
+            lock_pid=$(cat "${lock_file}/pid" 2>/dev/null || echo "")
+        fi
+        if [[ -f "${lock_file}/timestamp" ]]; then
+            lock_time=$(cat "${lock_file}/timestamp" 2>/dev/null || echo "")
+        fi
+        if [[ -f "${lock_file}/host" ]]; then
+            lock_host=$(cat "${lock_file}/host" 2>/dev/null || echo "")
+        fi
+        
+        # クリーンアップ条件の判定
+        if [[ -z "$lock_pid" ]] || [[ -z "$lock_time" ]]; then
+            should_remove=true
+            reason="incomplete lock information"
+        elif [[ "$lock_host" == "$(hostname)" ]] && ! ps -p "$lock_pid" > /dev/null 2>&1; then
+            should_remove=true
+            reason="process $lock_pid no longer exists"
+        elif [[ $((current_time - lock_time)) -gt $max_age ]]; then
+            should_remove=true
+            reason="lock expired (age: $((current_time - lock_time))s)"
+        fi
+        
+        # 古いロックを削除
+        if [[ "$should_remove" == "true" ]]; then
+            if rm -rf "$lock_file" 2>/dev/null; then
+                log_info "Cleaned up stale lock: $lock_name ($reason)"
+                ((cleaned_count++))
+            fi
+        fi
+    done
+    
+    if [[ $cleaned_count -gt 0 ]]; then
+        log_info "Cleaned up $cleaned_count stale locks"
+    else
+        log_debug "No stale locks found"
+    fi
+}
+
+# グローバル実行調整機能
+check_global_processing_limit() {
+    local max_concurrent=${1:-3}  # 最大同時実行数
+    local current_count=0
+    
+    if [[ ! -d "$EXECUTION_LOCK_DIR" ]]; then
+        return 0
+    fi
+    
+    # アクティブなロック数をカウント
+    find "$EXECUTION_LOCK_DIR" -name "*.lock" -type d 2>/dev/null | while IFS= read -r lock_file; do
+        if [[ -f "${lock_file}/pid" ]]; then
+            local lock_pid
+            lock_pid=$(cat "${lock_file}/pid" 2>/dev/null || echo "")
+            
+            # プロセスが実際に存在するかチェック
+            if [[ -n "$lock_pid" ]] && ps -p "$lock_pid" > /dev/null 2>&1; then
+                ((current_count++))
+            fi
+        fi
+    done
+    
+    if [[ $current_count -ge $max_concurrent ]]; then
+        log_info "Global processing limit reached: $current_count/$max_concurrent active processes"
+        return 1
+    fi
+    
+    return 0
+}
+
+# エラーハンドリング用のクリーンアップトラップ設定
+setup_lock_cleanup_trap() {
+    local lock_name=$1
+    
+    # 既存のトラップを保存
+    local existing_trap
+    existing_trap=$(trap -p EXIT)
+    
+    # 新しいクリーンアップトラップを設定
+    trap "
+        log_debug 'Process $$ exiting, cleaning up lock: $lock_name'
+        release_lock '$lock_name'
+        $existing_trap
+    " EXIT INT TERM
 }
 
 # Issue イベントの処理
@@ -283,12 +538,24 @@ process_issue_event() {
         return 0
     fi
     
+    # 古いロックのクリーンアップを実行
+    cleanup_stale_locks
+    
+    # グローバル同時実行制限をチェック
+    if ! check_global_processing_limit; then
+        log_warn "Cannot process Issue #${issue_number}: global processing limit reached"
+        return 1
+    fi
+    
     # ロックを取得
     local lock_name="${REPO_NAME//\//_}_issue_${issue_number}"
     if ! acquire_lock "$lock_name"; then
         log_error "Failed to acquire lock for Issue #${issue_number}"
         return 1
     fi
+    
+    # クリーンアップトラップを設定
+    setup_lock_cleanup_trap "$lock_name"
     
     # 実行履歴を更新（処理開始）
     update_execution_history "$issue_number" "$REPO_NAME" "in_progress" "Processing started"
@@ -496,12 +763,24 @@ process_pr_event() {
         return 0
     fi
     
+    # 古いロックのクリーンアップを実行
+    cleanup_stale_locks
+    
+    # グローバル同時実行制限をチェック
+    if ! check_global_processing_limit; then
+        log_warn "Cannot process PR #${pr_number}: global processing limit reached"
+        return 1
+    fi
+    
     # ロックを取得
     local lock_name="${REPO_NAME//\//_}_pr_${pr_number}"
     if ! acquire_lock "$lock_name"; then
         log_error "Failed to acquire lock for PR #${pr_number}"
         return 1
     fi
+    
+    # クリーンアップトラップを設定
+    setup_lock_cleanup_trap "$lock_name"
     
     # Claude実行パラメータを準備
     local execution_params

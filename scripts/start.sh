@@ -79,15 +79,15 @@ parse_arguments() {
 check_environment() {
     log_info "Checking environment..."
     
-    # 必須環境変数のチェック
-    if [[ -z "${GITHUB_TOKEN:-}" ]]; then
-        log_error "GITHUB_TOKEN environment variable is not set"
-        log_error "Please set it with: export GITHUB_TOKEN='your-github-token'"
+    # gh CLI認証のチェック
+    if ! gh auth status >/dev/null 2>&1; then
+        log_error "gh CLI is not authenticated"
+        log_error "Please run: gh auth login"
         return 1
     fi
     
     # 依存コマンドのチェック
-    local required_commands=("git" "curl" "jq" "yq")
+    local required_commands=("git" "gh" "jq" "yq")
     local missing_commands=()
     
     for cmd in "${required_commands[@]}"; do
