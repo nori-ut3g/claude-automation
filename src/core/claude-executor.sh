@@ -194,7 +194,13 @@ execute_claude() {
     log_info "Executing Claude Code..."
     
     # プロンプトファイルの作成
-    local prompt_file="${WORKSPACE_DIR}/.claude_prompt"
+    local prompt_file
+    if [[ -n "$WORKSPACE_DIR" ]]; then
+        prompt_file="${WORKSPACE_DIR}/.claude_prompt"
+    else
+        # Reply mode - use temporary directory
+        prompt_file="${CLAUDE_LOG_DIR}/.claude_prompt_${EXECUTION_ID}"
+    fi
     
     # より詳細なプロンプトを作成
     local detailed_prompt
@@ -213,14 +219,34 @@ If you need to see the current project structure, create files, or make modifica
     # プロンプトをファイルに保存
     echo "$detailed_prompt" > "$prompt_file"
     
+    # プロンプトファイルの確認
+    if [[ ! -f "$prompt_file" ]]; then
+        log_error "Failed to create prompt file: $prompt_file"
+        return 1
+    fi
+    
+    log_info "Prompt file created: $prompt_file ($(wc -c < "$prompt_file") bytes)"
+    
     # タイムアウト付きでClaude実行
     local start_time=$(date +%s)
     
     # 実際のClaude Code実行
-    log_info "Running Claude Code in workspace: $WORKSPACE_DIR"
+    log_info "Running Claude Code in workspace: ${WORKSPACE_DIR:-'(reply mode)'}"
+    log_info "Prompt file: $prompt_file"
+    
+    # Command construction - Claude requires prompt as argument, not stdin
+    local claude_command
+    if [[ -n "$WORKSPACE_DIR" ]]; then
+        claude_command="cd '$WORKSPACE_DIR' && claude --print \"\$(cat '$prompt_file')\""
+    else
+        claude_command="claude --print \"\$(cat '$prompt_file')\""
+    fi
+    
+    log_info "Command: $claude_command"
+    log_info "Timeout: $MAX_EXECUTION_TIME seconds"
     
     # プロンプトファイルを使ってClaude Codeを実行（非対話モード）
-    if timeout $MAX_EXECUTION_TIME bash -c "cd '$WORKSPACE_DIR' && echo \"\$(cat '$prompt_file')\" | claude" > "$claude_log" 2>&1; then
+    if timeout $MAX_EXECUTION_TIME bash -c "$claude_command" > "$claude_log" 2>&1; then
         log_info "Claude Code execution successful"
         
         # 実行時間の記録
@@ -242,7 +268,15 @@ If you need to see the current project structure, create files, or make modifica
             tail -20 "$claude_log" | while read -r line; do
                 log_error "  $line"
             done
+        else
+            log_error "No log file was created at: $claude_log"
+            log_error "This might indicate a command execution failure"
         fi
+        
+        # 追加のデバッグ情報
+        log_error "Failed command: $claude_command"
+        log_error "Working directory: $(pwd)"
+        log_error "Prompt file exists: $([[ -f "$prompt_file" ]] && echo "yes" || echo "no")"
         
         return $exit_code
     fi
