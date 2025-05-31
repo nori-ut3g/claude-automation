@@ -24,18 +24,16 @@ check_git() {
     fi
 }
 
-# GitHubトークンの設定
+# Git認証の設定（gh CLIを使用）
 setup_github_auth() {
-    local token=${1:-$GITHUB_TOKEN}
-    
-    if [[ -z "$token" ]]; then
-        log_error "GitHub token is not set"
+    # gh CLIの認証状態を確認
+    if ! gh auth status >/dev/null 2>&1; then
+        log_error "gh CLI is not authenticated. Please run 'gh auth login'"
         return 1
     fi
     
-    # Git認証ヘルパーの設定
-    git config --global credential.helper "store"
-    echo "https://x-access-token:${token}@github.com" > ~/.git-credentials
+    # gh CLIの認証情報をGitで使用するように設定
+    gh auth setup-git
     
     # ユーザー情報の設定（未設定の場合）
     if [[ -z "$(git config --global user.name)" ]]; then

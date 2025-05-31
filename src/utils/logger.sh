@@ -9,18 +9,22 @@
 
 set -euo pipefail
 
-# カラーコード定義
-readonly COLOR_RED='\033[0;31m'
-readonly COLOR_GREEN='\033[0;32m'
-readonly COLOR_YELLOW='\033[0;33m'
-readonly COLOR_BLUE='\033[0;34m'
-readonly COLOR_RESET='\033[0m'
+# カラーコード定義（既に定義済みの場合はスキップ）
+if [[ -z "${COLOR_RED:-}" ]]; then
+    readonly COLOR_RED='\033[0;31m'
+    readonly COLOR_GREEN='\033[0;32m'
+    readonly COLOR_YELLOW='\033[0;33m'
+    readonly COLOR_BLUE='\033[0;34m'
+    readonly COLOR_RESET='\033[0m'
+fi
 
-# ログレベル定義
-readonly LOG_LEVEL_DEBUG=0
-readonly LOG_LEVEL_INFO=1
-readonly LOG_LEVEL_WARN=2
-readonly LOG_LEVEL_ERROR=3
+# ログレベル定義（既に定義済みの場合はスキップ）
+if [[ -z "${LOG_LEVEL_DEBUG:-}" ]]; then
+    readonly LOG_LEVEL_DEBUG=0
+    readonly LOG_LEVEL_INFO=1
+    readonly LOG_LEVEL_WARN=2
+    readonly LOG_LEVEL_ERROR=3
+fi
 
 # デフォルト設定
 LOG_DIR="${LOG_DIR:-${CLAUDE_AUTO_HOME}/logs}"

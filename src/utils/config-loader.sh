@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# config-loader.sh - YAML設定ファイルを読み込むユーティリティ
+# config-loader.sh - YAML設定ファイルを読み込むユーティリティ（Bash 3.x互換版）
 # 
 # 使用方法:
 #   source src/utils/config-loader.sh
@@ -55,8 +55,8 @@ load_yaml() {
     echo "$expanded_content" | yq eval -o=json -
 }
 
-# 設定ファイルのキャッシュ
-declare -A CONFIG_CACHE
+# 設定ファイルのキャッシュ（Bash 3.x互換のため通常変数を使用）
+# CONFIG_CACHE_<name> という形式で保存
 
 # 設定ファイルの読み込み（キャッシュ付き）
 load_config() {
@@ -68,20 +68,25 @@ load_config() {
         config_file="${CONFIG_DIR}/${config_file}"
     fi
     
-    cache_key=$(basename "$config_file" .yaml)
+    cache_key=$(basename "$config_file" .yaml | tr '-' '_')
+    local cache_var="CONFIG_CACHE_${cache_key}"
     
     # キャッシュチェック
-    if [[ -n "${CONFIG_CACHE[$cache_key]:-}" ]]; then
+    if [[ -n "$(eval echo \${$cache_var:-})" ]]; then
         return 0
     fi
     
     # 設定を読み込んでキャッシュ
-    CONFIG_CACHE[$cache_key]=$(load_yaml "$config_file")
+    local loaded_config
+    loaded_config=$(load_yaml "$config_file")
     
-    if [[ -z "${CONFIG_CACHE[$cache_key]}" ]]; then
+    if [[ -z "$loaded_config" ]]; then
         echo "Error: Failed to load configuration from $config_file" >&2
         return 1
     fi
+    
+    # 動的にキャッシュ変数に設定
+    eval "${cache_var}=\$loaded_config"
 }
 
 # 設定値の取得
@@ -89,15 +94,17 @@ get_config_value() {
     local path=$1
     local default_value=${2:-}
     local config_name=${3:-repositories}
+    local cache_key=$(echo "$config_name" | tr '-' '_')
+    local cache_var="CONFIG_CACHE_${cache_key}"
     
     # 設定がロードされているか確認
-    if [[ -z "${CONFIG_CACHE[$config_name]:-}" ]]; then
+    if [[ -z "$(eval echo \${$cache_var:-})" ]]; then
         load_config "${config_name}.yaml" || return 1
     fi
     
     # jqでパスを評価
     local value
-    value=$(echo "${CONFIG_CACHE[$config_name]}" | jq -r ".$path // empty" 2>/dev/null)
+    value=$(eval "echo \"\$${cache_var}\"" | jq -r ".$path // empty" 2>/dev/null)
     
     if [[ -z "$value" || "$value" == "null" ]]; then
         echo "$default_value"
@@ -110,56 +117,64 @@ get_config_value() {
 get_config_array() {
     local path=$1
     local config_name=${2:-repositories}
+    local cache_key=$(echo "$config_name" | tr '-' '_')
+    local cache_var="CONFIG_CACHE_${cache_key}"
     
     # 設定がロードされているか確認
-    if [[ -z "${CONFIG_CACHE[$config_name]:-}" ]]; then
+    if [[ -z "$(eval echo \${$cache_var:-})" ]]; then
         load_config "${config_name}.yaml" || return 1
     fi
     
     # jqで配列を取得
-    echo "${CONFIG_CACHE[$config_name]}" | jq -r ".$path[]?" 2>/dev/null
+    eval "echo \"\$${cache_var}\"" | jq -r ".$path[]?" 2>/dev/null
 }
 
 # 配列の長さを取得
 get_config_array_length() {
     local path=$1
     local config_name=${2:-repositories}
+    local cache_key=$(echo "$config_name" | tr '-' '_')
+    local cache_var="CONFIG_CACHE_${cache_key}"
     
     # 設定がロードされているか確認
-    if [[ -z "${CONFIG_CACHE[$config_name]:-}" ]]; then
+    if [[ -z "$(eval echo \${$cache_var:-})" ]]; then
         load_config "${config_name}.yaml" || return 1
     fi
     
     # jqで配列の長さを取得
-    echo "${CONFIG_CACHE[$config_name]}" | jq ".$path | length" 2>/dev/null || echo 0
+    eval "echo \"\$${cache_var}\"" | jq ".$path | length" 2>/dev/null || echo 0
 }
 
 # オブジェクトの取得
 get_config_object() {
     local path=$1
     local config_name=${2:-repositories}
+    local cache_key=$(echo "$config_name" | tr '-' '_')
+    local cache_var="CONFIG_CACHE_${cache_key}"
     
     # 設定がロードされているか確認
-    if [[ -z "${CONFIG_CACHE[$config_name]:-}" ]]; then
+    if [[ -z "$(eval echo \${$cache_var:-})" ]]; then
         load_config "${config_name}.yaml" || return 1
     fi
     
     # jqでオブジェクトを取得
-    echo "${CONFIG_CACHE[$config_name]}" | jq ".$path" 2>/dev/null
+    eval "echo \"\$${cache_var}\"" | jq ".$path" 2>/dev/null
 }
 
 # 設定値の存在チェック
 config_exists() {
     local path=$1
     local config_name=${2:-repositories}
+    local cache_key=$(echo "$config_name" | tr '-' '_')
+    local cache_var="CONFIG_CACHE_${cache_key}"
     
     # 設定がロードされているか確認
-    if [[ -z "${CONFIG_CACHE[$config_name]:-}" ]]; then
+    if [[ -z "$(eval echo \${$cache_var:-})" ]]; then
         load_config "${config_name}.yaml" || return 1
     fi
     
     # jqでパスの存在を確認
-    echo "${CONFIG_CACHE[$config_name]}" | jq -e ".$path" &>/dev/null
+    eval "echo \"\$${cache_var}\"" | jq -e ".$path" &>/dev/null
 }
 
 # 有効なリポジトリの取得
@@ -243,7 +258,7 @@ get_prompt_template() {
 # 設定のリロード
 reload_config() {
     # キャッシュをクリア
-    CONFIG_CACHE=()
+    unset CONFIG_CACHE_repositories CONFIG_CACHE_integrations CONFIG_CACHE_claude_prompts
     
     # 主要な設定ファイルを再読み込み
     load_config "repositories.yaml"
@@ -263,13 +278,8 @@ validate_config() {
         fi
     done
     
-    # 必須環境変数のチェック
-    local required_env_vars=("GITHUB_TOKEN")
-    for var in "${required_env_vars[@]}"; do
-        if [[ -z "${!var:-}" ]]; then
-            errors+=("Missing required environment variable: $var")
-        fi
-    done
+    # 必須環境変数のチェック（現在は不要）
+    # gh CLIを使用するため、GITHUB_TOKENは不要になりました
     
     # エラーがあれば表示
     if [[ ${#errors[@]} -gt 0 ]]; then

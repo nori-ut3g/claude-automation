@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# github-client.sh - GitHub API拡張クライアント
+# github-client.sh - GitHub API拡張クライアント（gh CLI版）
 # 
 # 使用方法:
 #   ./src/integrations/github-client.sh <action> [parameters...]
@@ -20,69 +20,11 @@ CLAUDE_AUTO_HOME="${CLAUDE_AUTO_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../..
 source "${CLAUDE_AUTO_HOME}/src/utils/logger.sh"
 source "${CLAUDE_AUTO_HOME}/src/utils/config-loader.sh"
 
-# GitHub API設定
-GITHUB_TOKEN=""
-GITHUB_API_BASE=""
-
-# GitHub設定の読み込み
-load_github_config() {
-    local github_config
-    github_config=$(get_github_config)
-    
-    GITHUB_TOKEN=$(echo "$github_config" | jq -r '.token // ""')
-    GITHUB_API_BASE=$(echo "$github_config" | jq -r '.api_base // "https://api.github.com"')
-    
-    if [[ -z "$GITHUB_TOKEN" ]]; then
-        log_error "GitHub token is not configured"
+# gh CLIの認証状態確認
+check_gh_auth() {
+    if ! gh auth status >/dev/null 2>&1; then
+        log_error "gh CLI is not authenticated. Please run 'gh auth login'"
         exit 1
-    fi
-}
-
-# GitHub API呼び出し（既存のものを拡張）
-github_api_call() {
-    local endpoint=$1
-    local method=${2:-GET}
-    local data=${3:-}
-    
-    local url="${GITHUB_API_BASE}${endpoint}"
-    
-    local curl_opts=(
-        -s
-        -H "Accept: application/vnd.github.v3+json"
-        -H "Authorization: token ${GITHUB_TOKEN}"
-        -H "User-Agent: Claude-Automation-System"
-    )
-    
-    if [[ "$method" != "GET" ]]; then
-        curl_opts+=(-X "$method")
-    fi
-    
-    if [[ -n "$data" ]]; then
-        curl_opts+=(-d "$data")
-    fi
-    
-    local response
-    local http_code
-    
-    response=$(curl "${curl_opts[@]}" -w "\n%{http_code}" "$url")
-    http_code=$(echo "$response" | tail -n1)
-    response=$(echo "$response" | sed '$d')
-    
-    # レート制限のチェックと処理
-    if [[ "$http_code" == "403" ]] || [[ "$http_code" == "429" ]]; then
-        handle_rate_limit
-        # リトライ
-        response=$(curl "${curl_opts[@]}" -w "\n%{http_code}" "$url")
-        http_code=$(echo "$response" | tail -n1)
-        response=$(echo "$response" | sed '$d')
-    fi
-    
-    if [[ "$http_code" -ge 200 && "$http_code" -lt 300 ]]; then
-        echo "$response"
-        return 0
-    else
-        log_error "GitHub API call failed (HTTP $http_code): $response"
-        return 1
     fi
 }
 
@@ -90,16 +32,13 @@ github_api_call() {
 handle_rate_limit() {
     log_warn "GitHub API rate limit reached, checking reset time..."
     
-    local rate_limit_response
-    rate_limit_response=$(curl -s \
-        -H "Authorization: token ${GITHUB_TOKEN}" \
-        -H "Accept: application/vnd.github.v3+json" \
-        "${GITHUB_API_BASE}/rate_limit")
+    local rate_info
+    rate_info=$(gh api rate_limit)
     
     local remaining
     local reset_time
-    remaining=$(echo "$rate_limit_response" | jq -r '.rate.remaining')
-    reset_time=$(echo "$rate_limit_response" | jq -r '.rate.reset')
+    remaining=$(echo "$rate_info" | jq -r '.rate.remaining')
+    reset_time=$(echo "$rate_info" | jq -r '.rate.reset')
     
     if [[ "$remaining" == "0" ]]; then
         local current_time=$(date +%s)
@@ -130,38 +69,33 @@ create_pull_request() {
     local auto_merge
     auto_merge=$(echo "$pr_config" | jq -r '.auto_merge // false')
     
-    # PRデータの構築
-    local pr_data
-    pr_data=$(jq -n \
-        --arg title "$title" \
-        --arg body "$body" \
-        --arg head "$head" \
-        --arg base "$base" \
-        --arg draft "$draft" \
-        '{
-            title: $title,
-            body: $body,
-            head: $head,
-            base: $base,
-            draft: ($draft == "true")
-        }')
-    
     # PRの作成
-    local response
-    if response=$(github_api_call "/repos/${repo}/pulls" "POST" "$pr_data"); then
-        local pr_number
-        local pr_url
-        pr_number=$(echo "$response" | jq -r '.number')
-        pr_url=$(echo "$response" | jq -r '.html_url')
+    local gh_opts=()
+    gh_opts+=("--repo" "$repo")
+    gh_opts+=("--title" "$title")
+    gh_opts+=("--body" "$body")
+    gh_opts+=("--head" "$head")
+    gh_opts+=("--base" "$base")
+    
+    if [[ "$draft" == "true" ]]; then
+        gh_opts+=("--draft")
+    fi
+    
+    local pr_url
+    if pr_url=$(gh pr create "${gh_opts[@]}"); then
+        log_info "Created PR: ${pr_url}"
         
-        log_info "Created PR #${pr_number}: ${pr_url}"
+        # PR番号を取得
+        local pr_number
+        pr_number=$(echo "$pr_url" | grep -oE '[0-9]+$')
         
         # 自動マージの設定
         if [[ "$auto_merge" == "true" ]]; then
             enable_auto_merge "$repo" "$pr_number"
         fi
         
-        echo "$response"
+        # PR情報を取得して返す
+        gh pr view "$pr_number" --repo "$repo" --json number,url,title
         return 0
     else
         return 1
@@ -177,11 +111,11 @@ add_labels() {
     
     log_info "Adding labels to ${repo}#${issue_number}..."
     
-    # ラベルデータの構築
-    local label_data
-    label_data=$(printf '%s\n' "${labels[@]}" | jq -R . | jq -s '{labels: .}')
+    # ラベルをカンマ区切りに変換
+    local label_list
+    label_list=$(IFS=,; echo "${labels[*]}")
     
-    if github_api_call "/repos/${repo}/issues/${issue_number}/labels" "POST" "$label_data" > /dev/null; then
+    if gh issue edit "$issue_number" --repo "$repo" --add-label "$label_list"; then
         log_info "Labels added successfully"
         return 0
     else
@@ -198,11 +132,11 @@ request_review() {
     
     log_info "Requesting review for ${repo}#${pr_number}..."
     
-    # レビュアーデータの構築
-    local reviewer_data
-    reviewer_data=$(printf '%s\n' "${reviewers[@]}" | jq -R . | jq -s '{reviewers: .}')
+    # レビュアーをカンマ区切りに変換
+    local reviewer_list
+    reviewer_list=$(IFS=,; echo "${reviewers[*]}")
     
-    if github_api_call "/repos/${repo}/pulls/${pr_number}/requested_reviewers" "POST" "$reviewer_data" > /dev/null; then
+    if gh pr edit "$pr_number" --repo "$repo" --add-reviewer "$reviewer_list"; then
         log_info "Review requested successfully"
         return 0
     else
@@ -220,34 +154,44 @@ merge_pull_request() {
     
     # マージ可能性のチェック
     local pr_info
-    if ! pr_info=$(github_api_call "/repos/${repo}/pulls/${pr_number}"); then
-        return 1
-    fi
+    pr_info=$(gh pr view "$pr_number" --repo "$repo" --json mergeable,mergeStateStatus)
     
     local mergeable
     local merge_state
     mergeable=$(echo "$pr_info" | jq -r '.mergeable')
-    merge_state=$(echo "$pr_info" | jq -r '.mergeable_state')
+    merge_state=$(echo "$pr_info" | jq -r '.mergeStateStatus')
     
-    if [[ "$mergeable" != "true" ]]; then
+    if [[ "$mergeable" != "MERGEABLE" ]]; then
         log_error "PR is not mergeable (state: ${merge_state})"
         return 1
     fi
-    
-    # マージデータの構築
-    local merge_data
-    merge_data=$(jq -n --arg method "$merge_method" '{merge_method: $method}')
     
     # ブランチ削除設定の確認
     local delete_branch
     delete_branch=$(get_config_value "github.pr_settings.delete_branch" "true" "integrations")
     
+    # マージオプションの設定
+    local merge_opts=()
+    merge_opts+=("--repo" "$repo")
+    
+    case "$merge_method" in
+        "squash")
+            merge_opts+=("--squash")
+            ;;
+        "rebase")
+            merge_opts+=("--rebase")
+            ;;
+        "merge"|*)
+            merge_opts+=("--merge")
+            ;;
+    esac
+    
     if [[ "$delete_branch" == "true" ]]; then
-        merge_data=$(echo "$merge_data" | jq '.delete_branch_on_merge = true')
+        merge_opts+=("--delete-branch")
     fi
     
     # マージの実行
-    if github_api_call "/repos/${repo}/pulls/${pr_number}/merge" "PUT" "$merge_data" > /dev/null; then
+    if gh pr merge "$pr_number" "${merge_opts[@]}" --yes; then
         log_info "PR merged successfully"
         return 0
     else
@@ -262,28 +206,14 @@ enable_auto_merge() {
     
     log_info "Enabling auto-merge for ${repo}#${pr_number}..."
     
-    # GraphQL APIを使用（REST APIでは利用不可）
-    local query
-    query=$(cat <<EOF
-mutation {
-  enablePullRequestAutoMerge(input: {
-    pullRequestId: "${pr_number}",
-    mergeMethod: SQUASH
-  }) {
-    pullRequest {
-      autoMergeRequest {
-        enabledAt
-        enabledBy {
-          login
-        }
-      }
-    }
-  }
-}
-EOF
-    )
-    
-    log_warn "Auto-merge requires GraphQL API (not implemented in this version)"
+    # gh CLIでは直接auto-mergeを有効化できるコマンドがある
+    if gh pr merge "$pr_number" --repo "$repo" --auto --squash; then
+        log_info "Auto-merge enabled successfully"
+        return 0
+    else
+        log_warn "Failed to enable auto-merge"
+        return 1
+    fi
 }
 
 # チェックランの状態取得
@@ -293,18 +223,25 @@ get_check_status() {
     
     log_info "Getting check status for ${repo} @ ${ref}..."
     
-    local check_runs
-    if ! check_runs=$(github_api_call "/repos/${repo}/commits/${ref}/check-runs"); then
+    local checks
+    if ! checks=$(gh pr checks "$ref" --repo "$repo" 2>/dev/null || gh api "repos/${repo}/commits/${ref}/check-runs"); then
         return 1
     fi
     
+    # テキスト形式で出力された場合の処理
+    if [[ ! "$checks" =~ ^{.*}$ ]]; then
+        echo "$checks"
+        return 0
+    fi
+    
+    # JSON形式の場合
     local total_count
     local success_count
     local failure_count
     
-    total_count=$(echo "$check_runs" | jq -r '.total_count')
-    success_count=$(echo "$check_runs" | jq -r '[.check_runs[] | select(.conclusion == "success")] | length')
-    failure_count=$(echo "$check_runs" | jq -r '[.check_runs[] | select(.conclusion == "failure")] | length')
+    total_count=$(echo "$checks" | jq -r '.total_count')
+    success_count=$(echo "$checks" | jq -r '[.check_runs[] | select(.conclusion == "success")] | length')
+    failure_count=$(echo "$checks" | jq -r '[.check_runs[] | select(.conclusion == "failure")] | length')
     
     echo "Total: ${total_count}, Success: ${success_count}, Failure: ${failure_count}"
     
@@ -324,16 +261,20 @@ trigger_workflow() {
     
     log_info "Triggering workflow ${workflow_id} in ${repo}..."
     
-    local workflow_data
-    workflow_data=$(jq -n \
-        --arg ref "$ref" \
-        --argjson inputs "$inputs" \
-        '{
-            ref: $ref,
-            inputs: $inputs
-        }')
+    # gh workflowコマンドを使用
+    local workflow_opts=()
+    workflow_opts+=("--repo" "$repo")
+    workflow_opts+=("--ref" "$ref")
     
-    if github_api_call "/repos/${repo}/actions/workflows/${workflow_id}/dispatches" "POST" "$workflow_data"; then
+    # 入力パラメータの処理
+    if [[ "$inputs" != "{}" ]]; then
+        # inputsをkey=value形式に変換
+        local input_args
+        input_args=$(echo "$inputs" | jq -r 'to_entries | .[] | "--field \(.key)=\(.value)"' | tr '\n' ' ')
+        eval "workflow_opts+=($input_args)"
+    fi
+    
+    if gh workflow run "$workflow_id" "${workflow_opts[@]}"; then
         log_info "Workflow triggered successfully"
         return 0
     else
@@ -352,22 +293,20 @@ create_release() {
     
     log_info "Creating release ${tag_name} in ${repo}..."
     
-    local release_data
-    release_data=$(jq -n \
-        --arg tag "$tag_name" \
-        --arg name "$name" \
-        --arg body "$body" \
-        --arg draft "$draft" \
-        --arg prerelease "$prerelease" \
-        '{
-            tag_name: $tag,
-            name: $name,
-            body: $body,
-            draft: ($draft == "true"),
-            prerelease: ($prerelease == "true")
-        }')
+    local release_opts=()
+    release_opts+=("--repo" "$repo")
+    release_opts+=("--title" "$name")
+    release_opts+=("--notes" "$body")
     
-    if github_api_call "/repos/${repo}/releases" "POST" "$release_data" > /dev/null; then
+    if [[ "$draft" == "true" ]]; then
+        release_opts+=("--draft")
+    fi
+    
+    if [[ "$prerelease" == "true" ]]; then
+        release_opts+=("--prerelease")
+    fi
+    
+    if gh release create "$tag_name" "${release_opts[@]}"; then
         log_info "Release created successfully"
         return 0
     else
@@ -384,8 +323,8 @@ main() {
         exit 1
     fi
     
-    # GitHub設定の読み込み
-    load_github_config
+    # gh CLIの認証確認
+    check_gh_auth
     
     case "$action" in
         "create_pr")
