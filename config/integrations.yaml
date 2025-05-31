@@ -168,6 +168,39 @@ claude:
     max_execution_time: 600  # 秒（10分）
     max_retries: 2
     retry_delay: 120         # 秒
+    mode: "batch"            # batch, terminal, interactive
+  
+  # Terminal自動起動設定
+  terminal:
+    enabled: true
+    app: "Terminal"          # Terminal, iTerm, Warp
+    auto_detect_complex: true # 複雑なタスクを自動判定してTerminal実行
+    
+    # Terminal起動のトリガーキーワード
+    trigger_keywords:
+      - "@claude-terminal"
+      - "@claude-interactive"
+      - "@claude-visual"
+    
+    # Terminal起動のトリガーラベル
+    trigger_labels:
+      - "terminal-execution"
+      - "interactive"
+      - "complex-task"
+    
+    # 複雑なタスクの判定基準
+    complexity_threshold: 2  # 複雑さ指標の最小数
+    complexity_indicators:
+      - "複数のファイル"
+      - "multiple files"
+      - "新しいAPI" 
+      - "new API"
+      - "データベース"
+      - "database"
+      - "テスト"
+      - "test"
+      - "リファクタリング"
+      - "refactor"
   
   # コンテキスト設定
   context:
